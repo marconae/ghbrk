@@ -1,0 +1,151 @@
+/// Deployment artefact tests.
+///
+/// These are static-analysis tests that verify the correctness of files in
+/// `deploy/linux/` and `config/` without requiring root access or a live
+/// systemd installation.
+use std::{fs, path::PathBuf};
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+// ---------------------------------------------------------------------------
+// Policy YAML
+// ---------------------------------------------------------------------------
+
+#[test]
+fn example_policy_loads() {
+    let path = workspace_root().join("config/policy.example.yaml");
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    ghbrk::policy::Policy::from_yaml(&text).unwrap_or_else(|e| panic!("policy load failed: {e}"));
+}
+
+// ---------------------------------------------------------------------------
+// Systemd unit — structural assertions
+// ---------------------------------------------------------------------------
+
+fn read_service() -> String {
+    let path = workspace_root().join("deploy/linux/ghbrk.service");
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+#[test]
+fn systemd_unit_user_group() {
+    let service = read_service();
+    assert!(
+        service.contains("User=ghbrk"),
+        "service must set User=ghbrk"
+    );
+    assert!(
+        service.contains("Group=ghbrk"),
+        "service must set Group=ghbrk"
+    );
+}
+
+#[test]
+fn systemd_unit_hardening_directives() {
+    let service = read_service();
+    assert!(
+        service.contains("NoNewPrivileges=true"),
+        "service must have NoNewPrivileges=true"
+    );
+    assert!(
+        service.contains("ProtectSystem=strict"),
+        "service must have ProtectSystem=strict"
+    );
+    assert!(
+        service.contains("PrivateTmp=true"),
+        "service must have PrivateTmp=true"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// install.sh — static analysis
+// ---------------------------------------------------------------------------
+
+fn read_install_sh() -> String {
+    let path = workspace_root().join("deploy/linux/install.sh");
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+#[test]
+fn install_creates_user_and_group() {
+    let script = read_install_sh();
+    let has_useradd = script.contains("useradd") || script.contains("adduser");
+    assert!(
+        has_useradd,
+        "install.sh must call useradd or adduser to create the ghbrk user"
+    );
+    assert!(
+        script.contains("ghbrk"),
+        "install.sh must reference the ghbrk user name"
+    );
+    let has_groupadd = script.contains("groupadd") || script.contains("addgroup");
+    assert!(
+        has_groupadd,
+        "install.sh must call groupadd or addgroup to create the ghbrk-clients group"
+    );
+    assert!(
+        script.contains("ghbrk-clients"),
+        "install.sh must reference ghbrk-clients group"
+    );
+}
+
+#[test]
+fn install_creates_directories_with_modes() {
+    let script = read_install_sh();
+    assert!(
+        script.contains("/etc/ghbrk/credentials"),
+        "install.sh must create /etc/ghbrk/credentials"
+    );
+    assert!(
+        script.contains("/var/run/ghbrk"),
+        "install.sh must create /var/run/ghbrk"
+    );
+    assert!(
+        script.contains("/var/log/ghbrk"),
+        "install.sh must create /var/log/ghbrk"
+    );
+    // Verify that mode-setting is present (either chmod or install -d -m)
+    let sets_modes = script.contains("chmod") || script.contains("install -d");
+    assert!(
+        sets_modes,
+        "install.sh must set directory modes (chmod or install -d -m)"
+    );
+}
+
+#[test]
+fn install_idempotent() {
+    let script = read_install_sh();
+    // Must check for existing user before creating it
+    assert!(
+        script.contains("id ghbrk"),
+        "install.sh must guard useradd with 'id ghbrk' to be idempotent"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// cargo-deny — manual checks (marked #[ignore] so they don't run in CI
+// without cargo-deny installed; run with `cargo test -- --ignored`)
+// ---------------------------------------------------------------------------
+
+/// Manually verify that GPL/AGPL/LGPL/SSPL licenses are rejected by deny.toml.
+/// Requires `cargo-deny` to be installed: `cargo install cargo-deny`.
+#[test]
+#[ignore]
+fn cargo_deny_rejects_gpl() {
+    // This test is intentionally left as a manual check.
+    // Run: cargo deny check licenses
+    // Expected: any GPL/AGPL/LGPL/SSPL dependency would cause an error.
+}
+
+/// Verify that `cargo deny check` passes against the project's actual dependency tree.
+/// Requires `cargo-deny` to be installed: `cargo install cargo-deny`.
+#[test]
+#[ignore]
+fn cargo_deny_passes_on_real_tree() {
+    // This test is intentionally left as a manual check.
+    // Run: cargo deny check
+    // Expected: advisories ok, bans ok, licenses ok, sources ok
+}

@@ -1,0 +1,8 @@
+services:
+  git-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.sshd
+    container_name: ghbrk-it-git-server
+    ports:
+      - "2222:22"
