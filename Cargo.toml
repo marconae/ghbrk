@@ -1,0 +1,34 @@
+[package]
+name = "ghbrk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "ghbrk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ghbrk"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nix = { version = "0.29", features = ["user", "socket", "fs", "process", "signal"] }
+thiserror = "2"
+glob = "0.3"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "harness"
+path = "tests/integration/harness.rs"

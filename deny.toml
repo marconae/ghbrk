@@ -1,0 +1,41 @@
+[advisories]
+# Deny crates flagged as yanked
+yanked = "deny"
+ignore = []
+
+[licenses]
+# ghbrk is MIT-licensed; all dependencies must use permissive licenses.
+# GPL, AGPL, LGPL, and SSPL are forbidden.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+
+[bans]
+# Warn on multiple versions of the same crate
+multiple-versions = "warn"
+# Deny wildcard dependencies
+wildcards = "deny"
+highlight = "all"
+deny = [
+    { crate = "ring" },
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
+    { crate = "openssl-probe" },
+    { crate = "native-tls" },
+    { crate = "boring" },
+    { crate = "boring-sys" },
+]
+
+[sources]
+# Allow crates from crates.io only
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
