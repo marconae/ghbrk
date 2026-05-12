@@ -1,0 +1,92 @@
+# ghbrk policy.example.yaml
+#
+# Rules are evaluated in document order; the first match wins.
+# If no rule matches, the request is denied (default-deny).
+#
+# Fields per rule:
+#   user       - OS username of the calling process, or "*" for any user
+#   org        - GitHub organisation (or username for personal repos)
+#   repo       - Repository name
+#   operations - List of operations this rule covers (at least one required)
+#   branches   - Optional list of branch globs (default: ["*"])
+#   effect     - "allow" or "deny"
+#
+# Available operations:
+#   push, fetch, clone
+#   pr_open, pr_comment, pr_close, pr_merge, pr_review
+#   issue_open, issue_comment, issue_close
+#   release_create
+
+rules:
+  # -------------------------------------------------------------------------
+  # Explicit deny: nobody may force-push to the protected release branches.
+  # This rule runs before any allow rule so it takes precedence (first-match).
+  # -------------------------------------------------------------------------
+  - user: "*"
+    org: acme
+    repo: platform
+    operations:
+      - push
+    branches:
+      - "release/*"
+      - main
+    effect: deny
+
+  # -------------------------------------------------------------------------
+  # Named developer — full access to a specific repo on feature branches.
+  # -------------------------------------------------------------------------
+  - user: alice
+    org: acme
+    repo: platform
+    operations:
+      - push
+      - fetch
+      - clone
+    branches:
+      - "feature/*"
+      - develop
+    effect: allow
+
+  # -------------------------------------------------------------------------
+  # Named developer — PR and issue lifecycle on the same repo.
+  # -------------------------------------------------------------------------
+  - user: alice
+    org: acme
+    repo: platform
+    operations:
+      - pr_open
+      - pr_comment
+      - pr_close
+      - pr_merge
+      - pr_review
+      - issue_open
+      - issue_comment
+      - issue_close
+    effect: allow
+
+  # -------------------------------------------------------------------------
+  # Release manager — may create releases in addition to normal git ops.
+  # -------------------------------------------------------------------------
+  - user: release-bot
+    org: acme
+    repo: platform
+    operations:
+      - push
+      - fetch
+      - clone
+      - release_create
+    branches:
+      - "release/*"
+      - main
+    effect: allow
+
+  # -------------------------------------------------------------------------
+  # Wildcard user rule — everyone may fetch/clone public repos read-only.
+  # -------------------------------------------------------------------------
+  - user: "*"
+    org: acme
+    repo: "*"
+    operations:
+      - fetch
+      - clone
+    effect: allow

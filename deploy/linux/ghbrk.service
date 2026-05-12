@@ -1,0 +1,27 @@
+[Unit]
+Description=ghbrk — privilege-separated git/gh broker
+After=network.target
+
+[Service]
+Type=simple
+User=ghbrk
+Group=ghbrk
+ExecStart=/usr/local/bin/ghbrk daemon
+Environment=GHBRK_POLICY=/etc/ghbrk/policy.yaml
+Environment=GHBRK_AUDIT_LOG=/var/log/ghbrk/audit.log
+Environment=GHBRK_SOCKET=/var/run/ghbrk/broker.sock
+Restart=on-failure
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/run/ghbrk /var/log/ghbrk
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
