@@ -5,19 +5,21 @@ After=network.target
 [Service]
 Type=simple
 User=ghbrk
-Group=ghbrk
+Group=ghbrk-clients
 ExecStart=/usr/local/bin/ghbrk daemon
 Environment=GHBRK_POLICY=/etc/ghbrk/policy.yaml
 Environment=GHBRK_AUDIT_LOG=/var/log/ghbrk/audit.log
 Environment=GHBRK_SOCKET=/var/run/ghbrk/broker.sock
 Restart=on-failure
 RestartSec=5s
+RuntimeDirectory=ghbrk
+RuntimeDirectoryMode=2750
 
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
-ReadWritePaths=/var/run/ghbrk /var/log/ghbrk
+ReadWritePaths=/var/log/ghbrk
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

@@ -31,6 +31,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. Add ghbrk user to ghbrk-clients group (idempotent)
+# ---------------------------------------------------------------------------
+# -aG appends (vs. -G which replaces supplementary groups). Idempotent on re-run.
+usermod -aG ghbrk-clients ghbrk
+echo "Added ghbrk to group ghbrk-clients."
+
+# ---------------------------------------------------------------------------
 # 3. Install binary (only if built artefact is present)
 # ---------------------------------------------------------------------------
 if [ -f "$BINARY_SRC" ]; then
@@ -88,22 +95,46 @@ install -m 0644 -o root -g root "$SERVICE_SRC" "$SERVICE_DST"
 echo "Installed systemd unit to $SERVICE_DST"
 
 # ---------------------------------------------------------------------------
-# 8. Reload systemd if available
+# 8. Reload systemd daemon, enable, and (re)start the service if available
 # ---------------------------------------------------------------------------
+# restart starts the unit on first run and applies unit-file changes on re-runs.
 if command -v systemctl &>/dev/null; then
     systemctl daemon-reload
-    echo "Reloaded systemd daemon."
+    systemctl enable ghbrk
+    systemctl restart ghbrk
+    echo "ghbrk service reloaded, enabled, and restarted."
 fi
 
 # ---------------------------------------------------------------------------
-# Done — print enable instructions
+# 10. Add the invoking user to ghbrk-clients (if running under sudo)
+# ---------------------------------------------------------------------------
+# When invoked via sudo, $SUDO_USER holds the original (unprivileged) user. We
+# add that user to ghbrk-clients so their next login can talk to the broker
+# socket. When the script is run as actual root (no sudo), $SUDO_USER is unset
+# and we print a manual-add instruction instead.
+INVOKER="${SUDO_USER:-}"
+if [ -n "$INVOKER" ]; then
+    usermod -aG ghbrk-clients "$INVOKER"
+    echo "Added $INVOKER to group ghbrk-clients."
+    echo "NOTE: log out and back in for the group change to take effect."
+else
+    echo "NOTE: not invoked via sudo; no user was added to ghbrk-clients."
+    echo "      Run 'usermod -aG ghbrk-clients <username>' manually for each"
+    echo "      user that should be allowed to talk to the broker."
+fi
+
+# ---------------------------------------------------------------------------
+# Done — summarise what the script accomplished
 # ---------------------------------------------------------------------------
 echo ""
-echo "Installation complete."
-echo "To enable and start ghbrk:"
-echo "  systemctl enable ghbrk"
-echo "  systemctl start ghbrk"
+echo "Installation complete:"
+echo "  - ghbrk service enabled and running"
+if [ -n "$INVOKER" ]; then
+    echo "  - $INVOKER added to group ghbrk-clients (effective at next login)"
+else
+    echo "  - no invoking user detected; add operators to ghbrk-clients manually"
+fi
 echo ""
-echo "To check status:"
-echo "  systemctl status ghbrk"
-echo "  journalctl -u ghbrk -f"
+echo "Remaining manual steps:"
+echo "  1. Copy credentials into /etc/ghbrk/credentials/<username>/"
+echo "  2. Edit /etc/ghbrk/policy.yaml to allow the operations you need"

@@ -198,6 +198,59 @@ async fn daemon_survives_malformed_frame() {
 }
 
 #[test]
+fn socket_group_failure_logs_error() {
+    use std::sync::Mutex;
+
+    use nix::unistd::Gid;
+    use tracing::subscriber::set_default;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = BufWriter(buf.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .without_time()
+        .finish();
+
+    let nonexistent = PathBuf::from("/nonexistent/ghbrk-test/does-not-exist.sock");
+    let guard = set_default(subscriber);
+    ghbrk::broker::chown_socket_to_client_group(&nonexistent, Gid::from_raw(0));
+    drop(guard);
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8 log output");
+    assert!(
+        output.contains("ERROR"),
+        "expected ERROR level log, got:\n{output}"
+    );
+    assert!(
+        output.contains("Group=ghbrk-clients"),
+        "expected message to name Group=ghbrk-clients, got:\n{output}"
+    );
+}
+
+#[test]
 fn daemon_shuts_down_on_sigterm() {
     // Spawn the ghbrk binary as a real daemon, send it SIGTERM, and verify
     // it removes the socket file and exits with code zero. We use a

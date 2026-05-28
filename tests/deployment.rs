@@ -38,8 +38,8 @@ fn systemd_unit_user_group() {
         "service must set User=ghbrk"
     );
     assert!(
-        service.contains("Group=ghbrk"),
-        "service must set Group=ghbrk"
+        service.contains("Group=ghbrk-clients"),
+        "service must set Group=ghbrk-clients"
     );
 }
 
@@ -57,6 +57,19 @@ fn systemd_unit_hardening_directives() {
     assert!(
         service.contains("PrivateTmp=true"),
         "service must have PrivateTmp=true"
+    );
+}
+
+#[test]
+fn service_has_runtime_directory() {
+    let service = read_service();
+    assert!(
+        service.contains("RuntimeDirectory=ghbrk"),
+        "service must set RuntimeDirectory=ghbrk"
+    );
+    assert!(
+        service.contains("RuntimeDirectoryMode=2750"),
+        "service must set RuntimeDirectoryMode=2750"
     );
 }
 
@@ -155,6 +168,41 @@ fn install_guards_against_non_symlink_overwrite() {
     assert!(
         script.contains("refusing to overwrite") || script.contains("WARNING"),
         "install.sh must warn when refusing to overwrite a non-symlink"
+    );
+}
+
+#[test]
+fn install_adds_ghbrk_to_clients_group() {
+    let script = read_install_sh();
+    assert!(
+        script.contains("usermod -aG ghbrk-clients ghbrk"),
+        "install.sh must add the ghbrk user to ghbrk-clients via 'usermod -aG ghbrk-clients ghbrk'"
+    );
+}
+
+#[test]
+fn install_adds_sudo_user_to_clients_group() {
+    let script = read_install_sh();
+    assert!(
+        script.contains("$SUDO_USER"),
+        "install.sh must reference $SUDO_USER to identify the invoking user"
+    );
+    assert!(
+        script.contains("usermod -aG ghbrk-clients"),
+        "install.sh must add the invoking user to ghbrk-clients via 'usermod -aG ghbrk-clients'"
+    );
+}
+
+#[test]
+fn install_enables_service() {
+    let script = read_install_sh();
+    assert!(
+        script.contains("systemctl enable ghbrk"),
+        "install.sh must enable the ghbrk service with 'systemctl enable ghbrk'"
+    );
+    assert!(
+        script.contains("systemctl restart ghbrk"),
+        "install.sh must restart the ghbrk service with 'systemctl restart ghbrk'"
     );
 }
 

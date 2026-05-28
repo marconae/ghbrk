@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::sys::stat::{umask, Mode};
-use nix::unistd::{chown, Group, Uid, User};
+use nix::unistd::{chown, Gid, Group, Uid, User};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -165,8 +165,19 @@ fn apply_socket_group(socket_path: &Path) {
             return;
         }
     };
-    if let Err(err) = chown(socket_path, None, Some(group.gid)) {
-        warn!(error = %err, "chown to {CLIENT_GROUP_NAME} failed");
+    chown_socket_to_client_group(socket_path, group.gid);
+}
+
+/// Change the socket file's group to the resolved client-group GID. On
+/// failure, emit an `error!`-level log naming the systemd `Group=` directive
+/// that fixes the misconfiguration. Exposed for the broker integration tests.
+pub fn chown_socket_to_client_group(socket_path: &Path, gid: Gid) {
+    if let Err(err) = chown(socket_path, None, Some(gid)) {
+        error!(
+            error = %err,
+            "chown socket to {CLIENT_GROUP_NAME} failed; \
+             set Group=ghbrk-clients in the systemd unit to fix this"
+        );
     }
 }
 
