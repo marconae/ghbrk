@@ -62,3 +62,27 @@ Targets Linux only in v1. The install script creates the `ghbrk` system user and
 * *GIVEN* the project's actual `Cargo.toml` and `Cargo.lock`
 * *WHEN* `cargo deny check` is run
 * *THEN* the command MUST exit zero
+
+### Scenario: install.sh creates /usr/local/bin/git and /usr/local/bin/gh symlinks to ghbrk
+
+* *GIVEN* a Linux host where `/usr/local/bin/ghbrk` has been installed
+* *WHEN* the operator runs `deploy/linux/install.sh` as root
+* *THEN* the script MUST create a symlink at `/usr/local/bin/git` pointing to `/usr/local/bin/ghbrk`
+* *AND* the script MUST create a symlink at `/usr/local/bin/gh` pointing to `/usr/local/bin/ghbrk`
+* *AND* both symlinks MUST be created such that `/usr/local/bin` (which precedes `/usr/bin` in the default system PATH) routes `git` and `gh` invocations through the shim
+
+### Scenario: install.sh symlink creation is idempotent
+
+* *GIVEN* `install.sh` was already run successfully and the `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks exist
+* *WHEN* the operator runs `install.sh` a second time
+* *THEN* the script MUST exit zero
+* *AND* the script MUST NOT report a fatal error about existing symlinks
+* *AND* the symlinks MUST continue to point to `/usr/local/bin/ghbrk`
+
+### Scenario: install.sh refuses to overwrite a non-symlink at /usr/local/bin/git
+
+* *GIVEN* a Linux host where `/usr/local/bin/git` already exists as a regular file (not a symlink)
+* *WHEN* the operator runs `install.sh`
+* *THEN* the script MUST NOT silently delete or replace the existing regular file
+* *AND* the script MUST print a clear warning indicating the conflict
+* *AND* the script MUST continue with the remaining install steps

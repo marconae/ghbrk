@@ -6,7 +6,7 @@ Lets the `git` and `gh` shims run local and unsupported subcommands directly aga
 
 The shim is invoked as `git` or `gh` (via symlink or `ghbrk git` / `ghbrk gh`). Before any broker contact, the shim inspects the arguments and decides between two paths: broker-mediated execution for known remote operations, or direct passthrough for everything else. The broker-handled sets are fixed:
 
-- **git:** `push`, `fetch`, `clone`
+- **git:** `push`, `fetch`, `clone`, `pull`
 - **gh:** `(pr, create)`, `(pr, comment)`, `(pr, merge)`, `(pr, close)`, `(pr, review)`, `(issue, create)`, `(issue, comment)`, `(issue, close)`, `(release, create)`
 
 The first non-flag token is the git subcommand; the first two positional tokens are the gh `(group, action)` pair. Passthrough replaces the current process image via `exec()` so all stdio, signals, and the exit code are preserved with no buffering. The real binary path comes from shim configuration (see feature `ghbrk/shim-config`).
@@ -81,3 +81,45 @@ The first non-flag token is the git subcommand; the first two positional tokens 
 * *WHEN* the shim attempts to exec the real binary for a passthrough invocation
 * *THEN* the shim MUST exit non-zero
 * *AND* the shim MUST print an error naming the missing binary path to stderr
+
+### Scenario: Known remote git pull is routed to the broker
+
+* *GIVEN* the shim is invoked as `git pull origin main`
+* *WHEN* the shim evaluates the passthrough decision
+* *THEN* the shim MUST classify the invocation as broker-mediated
+* *AND* the shim MUST attempt to connect to the broker socket
+* *AND* the shim MUST NOT exec the real git binary directly
+
+### Scenario: git pull with global flags before the subcommand is broker-mediated
+
+* *GIVEN* the shim is invoked as `git -c http.sslVerify=false pull origin main`
+* *WHEN* the shim evaluates the passthrough decision
+* *THEN* the shim MUST treat `pull` as the subcommand
+* *AND* the shim MUST classify the invocation as broker-mediated
+
+### Scenario: Broker socket permission-denied (EACCES) silently passes through to real binary
+
+* *GIVEN* the shim is invoked for a broker-mediated subcommand
+* *AND* the broker socket file exists but the calling process lacks filesystem permission to connect (the `UnixStream::connect` call returns `EACCES`, POSIX errno 13)
+* *WHEN* the shim attempts to connect to the broker
+* *THEN* the shim MUST exec the real binary with the original arguments, preserving stdio, signals, and exit code via `exec()`
+* *AND* the shim MUST NOT print any `ghbrk:` message to stderr
+* *AND* the EACCES fallthrough MUST require no operator configuration (no config flag, no environment variable)
+
+### Scenario: Broker socket missing (ENOENT) still hard-fails
+
+* *GIVEN* the shim is invoked for a broker-mediated subcommand
+* *AND* the broker socket file does not exist (the `UnixStream::connect` call returns `ENOENT`)
+* *WHEN* the shim attempts to connect to the broker
+* *THEN* the shim MUST print a connection-error message naming the socket path to stderr
+* *AND* the shim MUST exit with the shim-error exit code
+* *AND* the shim MUST NOT exec the real binary
+
+### Scenario: Broker connection refused (ECONNREFUSED) still hard-fails
+
+* *GIVEN* the shim is invoked for a broker-mediated subcommand
+* *AND* the broker socket file exists but no process is listening (the `UnixStream::connect` call returns `ECONNREFUSED`)
+* *WHEN* the shim attempts to connect to the broker
+* *THEN* the shim MUST print a connection-error message naming the socket path to stderr
+* *AND* the shim MUST exit with the shim-error exit code
+* *AND* the shim MUST NOT exec the real binary

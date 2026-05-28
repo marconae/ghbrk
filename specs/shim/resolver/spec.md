@@ -4,7 +4,7 @@ Maps the shim request `(tool, args, cwd)` to a normalised `(operation, org, repo
 
 ## Background
 
-For `git`, the resolver reads `<cwd>/.git/config` (or walks upward) to find the `remote.origin.url`, parses it, and extracts org and repo. For `gh`, the resolver inspects subcommand args (e.g. `gh pr create -R acme/web` or current cwd's git remote). Branch resolution for `git push` reads the local refspec or `HEAD`. Only GitHub URLs are recognised; other forges produce an error.
+For `git`, the resolver reads `<cwd>/.git/config` (or walks upward) to find the `remote.origin.url`, parses it, and extracts org and repo. For `gh`, the resolver inspects subcommand args (e.g. `gh pr create -R acme/web` or current cwd's git remote). Branch resolution for `git push` reads the local refspec or `HEAD`. Read-side git operations (`fetch`, `clone`, `pull`) do not populate a branch — the policy decides at the operation level. Only GitHub URLs are recognised; other forges produce an error.
 
 ## Scenarios
 
@@ -64,3 +64,21 @@ For `git`, the resolver reads `<cwd>/.git/config` (or walks upward) to find the 
 * *WHEN* the resolver runs
 * *THEN* the resolver MUST return an error or an `unknown` operation
 * *AND* the daemon MUST treat the request as denied
+
+### Scenario: Resolve git pull in existing repo
+
+* *GIVEN* `cwd` is a git repo with `remote.origin.url=https://github.com/acme/web.git`
+* *WHEN* the resolver processes `git pull origin`
+* *THEN* the resolver MUST produce `{ op: pull, org: acme, repo: web, branch: None }`
+
+### Scenario: Resolve git pull rejects non-GitHub remote
+
+* *GIVEN* `cwd` is a git repo with `remote.origin.url=git@gitlab.com:acme/web.git`
+* *WHEN* the resolver processes `git pull`
+* *THEN* the resolver MUST return an error indicating the host is not GitHub
+
+### Scenario: Resolve git pull outside any repo is rejected
+
+* *GIVEN* `cwd` is `/tmp` and contains no git repo
+* *WHEN* the resolver processes `git pull`
+* *THEN* the resolver MUST return an error indicating no repository was found

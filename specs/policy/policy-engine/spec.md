@@ -15,7 +15,7 @@ Rules are evaluated in document order; the first matching rule wins. If no rule 
   effect: allow          # required; "allow" | "deny"
 ```
 
-The operations vocabulary is fixed: `push`, `fetch`, `clone`, `pr_open`, `pr_comment`, `pr_close`, `pr_merge`, `pr_review`, `issue_open`, `issue_comment`, `issue_close`, `release_create`. Branch matching is glob-style (`*` and `?`).
+The operations vocabulary is fixed: `push`, `fetch`, `clone`, `pull`, `pr_open`, `pr_comment`, `pr_close`, `pr_merge`, `pr_review`, `issue_open`, `issue_comment`, `issue_close`, `release_create`. Branch matching is glob-style (`*` and `?`) and applies only to operations with `has_branch() == true` (currently `push` only). The `pull` operation is treated as distinct from `fetch`: a rule listing one MUST NOT implicitly match the other.
 
 ## Scenarios
 
@@ -75,4 +75,24 @@ The operations vocabulary is fixed: `push`, `fetch`, `clone`, `pr_open`, `pr_com
 
 * *GIVEN* a rule with `operations: [issue_open]`
 * *WHEN* the engine evaluates an `issue_open` request that has no associated branch
+* *THEN* the engine MUST evaluate the rule without requiring a branch match
+
+### Scenario: Policy with pull operation loads successfully
+
+* *GIVEN* a YAML policy file containing a rule with `operations: [pull]`
+* *WHEN* the engine loads the file
+* *THEN* loading MUST succeed without errors
+* *AND* the rule's operations list MUST include the `pull` operation
+
+### Scenario: Pull operation is matched independently of fetch
+
+* *GIVEN* a policy with one rule `{ user: alice, org: acme, repo: web, operations: [fetch], branches: ["*"], effect: allow }`
+* *WHEN* the engine evaluates `(user=alice, org=acme, repo=web, op=pull, branch=None)`
+* *THEN* the rule MUST NOT match
+* *AND* the engine MUST return `deny`
+
+### Scenario: Pull operation ignores branch field in rule
+
+* *GIVEN* a rule with `operations: [pull]` and `branches: [main]`
+* *WHEN* the engine evaluates a `pull` request with no associated branch
 * *THEN* the engine MUST evaluate the rule without requiring a branch match
