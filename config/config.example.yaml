@@ -1,0 +1,11 @@
+# /etc/ghbrk/config.yaml — shim configuration
+#
+# This file is optional. When absent, the shim uses the compiled-in defaults
+# shown below. Create this file only if your system installs git or gh at
+# non-standard paths.
+
+# Path to the real git binary (used for passthrough of local subcommands).
+real_git: /usr/bin/git
+
+# Path to the real gh binary (used for passthrough of unsupported subcommands).
+real_gh: /usr/bin/gh

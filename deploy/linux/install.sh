@@ -7,6 +7,8 @@ SERVICE_SRC="$(dirname "$0")/ghbrk.service"
 SERVICE_DST="/etc/systemd/system/ghbrk.service"
 POLICY_SRC="$(dirname "$0")/../../config/policy.example.yaml"
 POLICY_DST="/etc/ghbrk/policy.yaml"
+CONFIG_SRC="$(dirname "$0")/../../config/config.example.yaml"
+CONFIG_DST="/etc/ghbrk/config.yaml"
 
 # ---------------------------------------------------------------------------
 # 1. Create system user ghbrk (idempotent)
@@ -43,7 +45,7 @@ fi
 # ---------------------------------------------------------------------------
 install -d -m 0755 /etc/ghbrk
 install -d -m 0700 -o ghbrk -g ghbrk /etc/ghbrk/credentials
-install -d -m 0750 -o ghbrk -g ghbrk-clients /var/run/ghbrk
+install -d -m 2750 -o ghbrk -g ghbrk-clients /var/run/ghbrk
 install -d -m 0750 -o ghbrk -g ghbrk-clients /var/log/ghbrk
 
 # ---------------------------------------------------------------------------
@@ -57,13 +59,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Install systemd unit
+# 6. Install example shim config (no overwrite if already present)
+# ---------------------------------------------------------------------------
+if [ ! -f "$CONFIG_DST" ]; then
+    install -m 0644 -o root -g root "$CONFIG_SRC" "$CONFIG_DST"
+    echo "Installed example config to $CONFIG_DST"
+else
+    echo "Config file $CONFIG_DST already exists, skipping."
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Install systemd unit
 # ---------------------------------------------------------------------------
 install -m 0644 -o root -g root "$SERVICE_SRC" "$SERVICE_DST"
 echo "Installed systemd unit to $SERVICE_DST"
 
 # ---------------------------------------------------------------------------
-# 7. Reload systemd if available
+# 8. Reload systemd if available
 # ---------------------------------------------------------------------------
 if command -v systemctl &>/dev/null; then
     systemctl daemon-reload

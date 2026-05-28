@@ -55,7 +55,8 @@ The install script (idempotent; safe to re-run):
    - `/var/run/ghbrk/` — mode `0750`, group `ghbrk-clients`
    - `/var/log/ghbrk/` — mode `0750`, group `ghbrk-clients`
 4. Writes a starter policy to `/etc/ghbrk/policy.yaml` if one does not exist
-5. Installs the systemd unit and reloads the daemon
+5. Writes a starter shim config to `/etc/ghbrk/config.yaml` if one does not exist
+6. Installs the systemd unit and reloads the daemon
 
 Check the service:
 
@@ -136,6 +137,17 @@ sudo chmod 0600 /etc/ghbrk/credentials/alice/token
 
 The token needs the scopes required by the operations you allow (`repo`, `workflow`, etc.). Token contents are never written to logs.
 
+### Shim config
+
+`/etc/ghbrk/config.yaml` tells the shim where the real `git` and `gh` binaries live. The file is **optional** — when absent the shim falls back to the compiled-in defaults (`/usr/bin/git` and `/usr/bin/gh`).
+
+```yaml
+real_git: /usr/bin/git
+real_gh: /usr/bin/gh
+```
+
+Set these only if your system installs the binaries at non-standard paths (e.g. `/usr/local/bin/git` from Homebrew-on-Linux or a custom build). A malformed file is a fatal error; a missing file is silently ignored.
+
 ## Agent setup
 
 Place `git` and `gh` symlinks that resolve to the `ghbrk` binary early in the agent's `PATH`. When invoked via a symlink named `git` or `gh`, `ghbrk` detects this automatically and routes to the broker.
@@ -162,10 +174,36 @@ To verify the shim is active in the agent's session:
 
 ```bash
 which git   # should print ~/.local/bin/git
-git status  # should work normally if the daemon is running and a rule allows it
+git status  # passes through to the real git; no broker contact required
 ```
 
 If the broker socket is not at the default path, set `GHBRK_SOCKET` in the agent's environment.
+
+## Command routing
+
+The shim makes a routing decision before contacting the broker. Commands that do not require broker involvement are passed directly to the real binary via `exec()` — the broker is never contacted and no policy check occurs.
+
+### git
+
+| Subcommand | Routed to |
+|------------|-----------|
+| `push` | broker |
+| `fetch` | broker |
+| `clone` (GitHub remote) | broker |
+| `status`, `add`, `commit`, `log`, `diff`, `checkout`, and everything else | real `git` binary |
+
+The classification is based on the first non-flag argument (global flags such as `-c`, `-C`, `--git-dir`, and `--work-tree` are skipped). An invocation with no subcommand is passed through.
+
+### gh
+
+| Group + action | Routed to |
+|----------------|-----------|
+| `pr create`, `pr comment`, `pr merge`, `pr close`, `pr review` | broker |
+| `issue create`, `issue comment`, `issue close` | broker |
+| `release create` | broker |
+| `auth status`, `repo view`, `pr list`, `pr status`, and everything else | real `gh` binary |
+
+The classification is based on the first two positional arguments. Any `(group, action)` pair not in the brokered set is passed through.
 
 ## Operations reference
 
