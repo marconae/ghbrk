@@ -125,6 +125,39 @@ fn install_idempotent() {
     );
 }
 
+#[test]
+fn install_creates_usr_local_bin_symlinks() {
+    let script = read_install_sh();
+    assert!(
+        script.contains("/usr/local/bin/git"),
+        "install.sh must create /usr/local/bin/git symlink"
+    );
+    assert!(
+        script.contains("/usr/local/bin/gh"),
+        "install.sh must create /usr/local/bin/gh symlink"
+    );
+    assert!(
+        script.contains("ln -sfn"),
+        "install.sh must use 'ln -sfn' for idempotent symlink creation"
+    );
+}
+
+#[test]
+fn install_guards_against_non_symlink_overwrite() {
+    let script = read_install_sh();
+    // The guard uses [ ! -L "$LINK_PATH" ] or equivalent
+    let has_symlink_test =
+        script.contains("! -L") || script.contains("-L \"") || script.contains("[ -L");
+    assert!(
+        has_symlink_test,
+        "install.sh must test for symlink (-L) to guard against overwriting a regular file"
+    );
+    assert!(
+        script.contains("refusing to overwrite") || script.contains("WARNING"),
+        "install.sh must warn when refusing to overwrite a non-symlink"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // cargo-deny — manual checks (marked #[ignore] so they don't run in CI
 // without cargo-deny installed; run with `cargo test -- --ignored`)

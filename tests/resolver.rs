@@ -129,6 +129,30 @@ fn unknown_git_subcommand_denied() {
 }
 
 #[test]
+fn resolve_git_pull() {
+    let dir = make_repo("https://github.com/acme/web.git", "main");
+    let resolved = resolve_git(&args(&["pull"]), dir.path()).expect("resolve");
+    assert_eq!(resolved.operation, Operation::Pull);
+    assert_eq!(resolved.org, "acme");
+    assert_eq!(resolved.repo, "web");
+    assert!(resolved.branch.is_none());
+}
+
+#[test]
+fn resolve_git_pull_outside_repo() {
+    let outside = tempfile::tempdir().unwrap();
+    let err = resolve_git(&args(&["pull"]), outside.path()).expect_err("no repo");
+    assert!(matches!(err, ResolverError::NoRepoContext(_)));
+}
+
+#[test]
+fn resolve_git_pull_rejects_non_github() {
+    let dir = make_repo("git@gitlab.com:acme/web.git", "main");
+    let err = resolve_git(&args(&["pull"]), dir.path()).expect_err("non-github");
+    assert!(matches!(err, ResolverError::NonGithubHost(h) if h == "gitlab.com"));
+}
+
+#[test]
 fn walks_up_to_find_git_dir() {
     let dir = make_repo("git@github.com:acme/web.git", "main");
     let nested: PathBuf = dir.path().join("subdir/deep");

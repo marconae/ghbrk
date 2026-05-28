@@ -90,3 +90,14 @@ rules:
       - fetch
       - clone
     effect: allow
+
+  # -------------------------------------------------------------------------
+  # Allow pull without allowing fetch — useful when agents should be able to
+  # update their working tree but not explicitly fetch remote branches.
+  # -------------------------------------------------------------------------
+  # - user: agent-user
+  #   org: acme
+  #   repo: platform
+  #   operations:
+  #     - pull
+  #   effect: allow

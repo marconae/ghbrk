@@ -24,7 +24,10 @@ fn first_non_flag(args: &[String]) -> Option<&str> {
 }
 
 fn git_is_broker_op(args: &[String]) -> bool {
-    matches!(first_non_flag(args), Some("push" | "fetch" | "clone"))
+    matches!(
+        first_non_flag(args),
+        Some("push" | "fetch" | "clone" | "pull")
+    )
 }
 
 fn gh_is_broker_op(args: &[String]) -> bool {
@@ -142,6 +145,19 @@ mod tests {
     #[test]
     fn git_no_subcommand_is_passthrough() {
         assert!(is_passthrough(Tool::Git, &s(&[])));
+    }
+
+    #[test]
+    fn git_pull_is_broker_op() {
+        assert!(!is_passthrough(Tool::Git, &s(&["pull", "origin", "main"])));
+    }
+
+    #[test]
+    fn git_pull_with_c_flag_prefix_is_broker_op() {
+        assert!(!is_passthrough(
+            Tool::Git,
+            &s(&["-c", "k=v", "pull", "origin", "main"])
+        ));
     }
 
     // --- gh broker-op tests (task 2.5) ---

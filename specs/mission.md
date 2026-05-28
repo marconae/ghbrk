@@ -37,7 +37,7 @@ AI coding agents (e.g. Claude Code running with bypass permissions) need to push
 | Shim | The `ghbrk` binary placed in an agent's `PATH`, symlinked as `git` and `gh`; intercepts invocations and relays them to the broker via Unix socket |
 | Caller | The Unix user whose agent issued a Git/GitHub command; identified by the broker via `SO_PEERCRED` |
 | Policy | The YAML configuration (`/etc/ghbrk/policy.yaml`) defining which operations callers may perform on which repos and branches |
-| Operation | A categorised Git/GitHub action: `push`, `fetch`, `clone`, `pr_open`, `pr_comment`, `pr_close`, `pr_merge`, `pr_review`, `issue_open`, `issue_comment`, `issue_close`, `release_create` |
+| Operation | A categorised Git/GitHub action: `push`, `fetch`, `pull`, `clone`, `pr_open`, `pr_comment`, `pr_close`, `pr_merge`, `pr_review`, `issue_open`, `issue_comment`, `issue_close`, `release_create` |
 
 ---
 

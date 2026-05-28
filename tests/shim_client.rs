@@ -17,7 +17,16 @@ fn socket_in(dir: &TempDir) -> PathBuf {
 async fn capture(tool: Tool, args: Vec<String>, cwd: PathBuf, socket_path: &Path) -> ShimOutcome {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let code = run_shim_with_io(tool, args, cwd, socket_path, &mut stdout, &mut stderr).await;
+    let code = run_shim_with_io(
+        tool,
+        args,
+        cwd,
+        socket_path,
+        "/usr/bin/git",
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
     ShimOutcome {
         code,
         stdout,
@@ -283,6 +292,80 @@ async fn shim_preserves_chunk_order_across_stdio_streams() {
     assert_eq!(outcome.code, 0);
     assert_eq!(outcome.stdout, b"out-1\nout-2\nout-3\n");
     assert_eq!(outcome.stderr, b"err-1\n");
+}
+
+#[test]
+fn broker_eacces_silently_execs_real_binary() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener as StdUnixListener;
+
+    // Root bypasses DAC checks so chmod 000 would not produce EACCES.
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let socket_path = tmp.path().join("broker.sock");
+
+    // Create a real Unix socket file so connect sees a socket node, then
+    // chmod 000 so the connect attempt is denied with EACCES.
+    let listener = StdUnixListener::bind(&socket_path).expect("bind socket");
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o000)).expect("chmod 000 socket");
+    drop(listener);
+
+    let config_path = tmp.path().join("config.yaml");
+    fs::write(&config_path, "real_git: /bin/true\n").expect("write config");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ghbrk"))
+        .arg("git")
+        .arg("push")
+        .env("GHBRK_SOCKET", &socket_path)
+        .env("GHBRK_CONFIG", &config_path)
+        .output()
+        .expect("spawn ghbrk");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "expected exit 0 from /bin/true after EACCES fallthrough; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("ghbrk:"),
+        "expected no ghbrk error on EACCES fallthrough, got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn broker_missing_still_hard_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket_path = tmp.path().join("nonexistent.sock");
+
+    // Use an empty config file so /etc/ghbrk/config.yaml on the host
+    // (if present) cannot influence the test.
+    let config_path = tmp.path().join("config.yaml");
+    std::fs::write(&config_path, "").expect("write empty config");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ghbrk"))
+        .arg("git")
+        .arg("push")
+        .env("GHBRK_SOCKET", &socket_path)
+        .env("GHBRK_CONFIG", &config_path)
+        .output()
+        .expect("spawn ghbrk");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "expected non-zero exit when broker socket is missing (ENOENT)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot connect to broker"),
+        "expected 'cannot connect to broker' in stderr, got: {stderr}"
+    );
 }
 
 #[tokio::test]

@@ -204,6 +204,7 @@ pub fn resolve_git(args: &[String], cwd: &Path) -> Result<ResolvedRequest, Resol
     match subcmd.as_str() {
         "push" => resolve_git_push(args, cwd),
         "fetch" => resolve_git_remote_op(args, cwd, Operation::Fetch),
+        "pull" => resolve_git_remote_op(args, cwd, Operation::Pull),
         "clone" => resolve_git_clone(args),
         other => Err(ResolverError::UnknownGitSubcommand(other.to_string())),
     }

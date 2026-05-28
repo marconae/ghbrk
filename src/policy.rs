@@ -11,6 +11,7 @@ const WILDCARD: &str = "*";
 pub enum Operation {
     Push,
     Fetch,
+    Pull,
     Clone,
     PrOpen,
     PrComment,
@@ -441,6 +442,85 @@ rules:
                 Operation::Push,
                 Some("anything")
             )),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn pull_has_branch_is_false() {
+        assert!(!Operation::Pull.has_branch());
+    }
+
+    #[test]
+    fn policy_with_pull_loads() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [pull]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(policy.rules[0].operations, vec![Operation::Pull]);
+    }
+
+    #[test]
+    fn fetch_rule_does_not_match_pull() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [fetch]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        // Fetch rule must NOT match a pull request.
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Pull, None)),
+            Decision::Deny { .. }
+        ));
+        // Pull rule must match a pull request.
+        let pull_policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [pull]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pull_policy.evaluate(&req("alice", "acme", "web", Operation::Pull, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn pull_ignores_branch_field() {
+        // A rule with operations: [pull] and branches: [main] must match
+        // operation: Pull with branch: None (branchless operation).
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [pull]
+    branches: [main]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Pull, None)),
             Decision::Allow
         );
     }

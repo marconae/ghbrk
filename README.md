@@ -164,6 +164,8 @@ In the agent's environment (e.g. Claude Code's `env` configuration):
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+On hosts where `install.sh` has been run, system-wide `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks already point at the `ghbrk` binary. Because `/usr/local/bin` precedes `/usr/bin` in the standard system `PATH`, these callers do not need per-user shim placement — the symlinks are picked up automatically.
+
 The agent must also be a member of the `ghbrk-clients` group so it can reach the socket:
 
 ```bash
@@ -189,6 +191,7 @@ The shim makes a routing decision before contacting the broker. Commands that do
 |------------|-----------|
 | `push` | broker |
 | `fetch` | broker |
+| `pull` | broker |
 | `clone` (GitHub remote) | broker |
 | `status`, `add`, `commit`, `log`, `diff`, `checkout`, and everything else | real `git` binary |
 
@@ -213,6 +216,7 @@ The classification is based on the first two positional arguments. Any `(group, 
 |-----------|-------------|:------------:|
 | `push` | `git push` | yes |
 | `fetch` | `git fetch` | no |
+| `pull` | `git pull` | no |
 | `clone` | `git clone` | no |
 | `pr_open` | `gh pr create` | no |
 | `pr_comment` | `gh pr comment` | no |

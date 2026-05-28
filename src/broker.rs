@@ -407,6 +407,7 @@ fn operation_name(op: Operation) -> &'static str {
     match op {
         Operation::Push => "push",
         Operation::Fetch => "fetch",
+        Operation::Pull => "pull",
         Operation::Clone => "clone",
         Operation::PrOpen => "pr_open",
         Operation::PrComment => "pr_comment",
@@ -501,11 +502,15 @@ mod tests {
         for op in [
             Operation::Push,
             Operation::Fetch,
+            Operation::Pull,
             Operation::Clone,
             Operation::PrOpen,
+            Operation::PrComment,
             Operation::PrMerge,
             Operation::PrClose,
+            Operation::PrReview,
             Operation::IssueOpen,
+            Operation::IssueComment,
             Operation::IssueClose,
             Operation::ReleaseCreate,
         ] {

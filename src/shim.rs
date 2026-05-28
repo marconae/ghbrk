@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use crate::passthrough::exec_passthrough;
 use crate::protocol::{read_frame, write_frame, ProtocolError, Request, ServerFrame, Tool};
 
 /// Default broker socket path, overridable via `GHBRK_SOCKET`.
@@ -14,6 +15,9 @@ pub const SOCKET_ENV_VAR: &str = "GHBRK_SOCKET";
 
 /// Exit code used when the broker cannot be reached or the protocol fails.
 pub const SHIM_ERROR_EXIT: i32 = 1;
+
+/// POSIX EACCES errno value — stable across Linux and macOS.
+const EACCES: i32 = 13;
 
 /// Result of a captured shim run for testing.
 #[derive(Debug)]
@@ -37,6 +41,7 @@ pub async fn run_shim_with_io<O, E>(
     args: Vec<String>,
     cwd: PathBuf,
     socket_path: &Path,
+    real_path: &str,
     stdout: &mut O,
     stderr: &mut E,
 ) -> i32
@@ -47,6 +52,13 @@ where
     let stream = match UnixStream::connect(socket_path).await {
         Ok(s) => s,
         Err(err) => {
+            // EACCES — POSIX errno, stable across Linux/macOS. The broker
+            // socket exists but this process lacks permission to connect, so
+            // policy enforcement is provably impossible regardless of what
+            // ghbrk does. Silently exec the real binary; never returns.
+            if err.raw_os_error() == Some(EACCES) {
+                exec_passthrough(real_path, &args);
+            }
             let msg = format!(
                 "ghbrk: cannot connect to broker at {}: {}\n",
                 socket_path.display(),
@@ -116,8 +128,14 @@ where
 /// Run the shim against the broker socket resolved from the environment, with
 /// real stdio attached. Suitable for use from synchronous `main`-side code by
 /// constructing a Tokio runtime around it.
-pub async fn run_shim(tool: Tool, args: Vec<String>, cwd: PathBuf, socket_path: &Path) -> i32 {
+pub async fn run_shim(
+    tool: Tool,
+    args: Vec<String>,
+    cwd: PathBuf,
+    socket_path: &Path,
+    real_path: &str,
+) -> i32 {
     let mut out = tokio::io::stdout();
     let mut err = tokio::io::stderr();
-    run_shim_with_io(tool, args, cwd, socket_path, &mut out, &mut err).await
+    run_shim_with_io(tool, args, cwd, socket_path, real_path, &mut out, &mut err).await
 }
