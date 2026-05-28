@@ -1,0 +1,58 @@
+# Feature: credential-injection
+
+Selects and injects credentials into the spawned `git` or `gh` child process so the agent never sees the secret material directly. Selection is based on the resolved remote URL scheme.
+
+## Background
+
+Credentials live under `/etc/ghbrk/credentials/<username>/` owned by the `ghbrk` user with mode `0600`. Two files are recognised: `id_rsa` (SSH private key) and `token` (HTTPS / GH API token). The daemon process must have read access; agent processes must not. The injection function returns a set of environment variables to be applied to the child's environment.
+
+## Scenarios
+
+### Scenario: SSH URL selects SSH key injection
+
+* *GIVEN* the resolved URL is `git@github.com:acme/web.git`
+* *AND* the file `/etc/ghbrk/credentials/alice/id_rsa` exists with mode `0600`
+* *WHEN* the injector prepares the child environment for user `alice`
+* *THEN* the environment MUST set `GIT_SSH_COMMAND=ssh -i /etc/ghbrk/credentials/alice/id_rsa -o StrictHostKeyChecking=accept-new`
+
+### Scenario: HTTPS URL selects token injection for git
+
+* *GIVEN* the resolved URL is `https://github.com/acme/web.git`
+* *AND* the file `/etc/ghbrk/credentials/alice/token` exists with mode `0600`
+* *WHEN* the injector prepares the child environment for user `alice` invoking `git`
+* *THEN* the environment MUST set a credential helper or `GIT_ASKPASS` value that supplies the token to git
+* *AND* the token contents MUST NOT appear on the child's argv
+
+### Scenario: gh CLI receives GH_TOKEN
+
+* *GIVEN* the request tool is `gh`
+* *AND* `/etc/ghbrk/credentials/alice/token` exists
+* *WHEN* the injector prepares the child environment
+* *THEN* the environment MUST set `GH_TOKEN` to the token file contents
+
+### Scenario: SSH URL with missing key returns explicit error
+
+* *GIVEN* the resolved URL is `git@github.com:acme/web.git`
+* *AND* `/etc/ghbrk/credentials/alice/id_rsa` does not exist
+* *WHEN* the injector prepares the child environment
+* *THEN* the injector MUST return an error indicating the SSH key is missing for user `alice`
+
+### Scenario: HTTPS URL with missing token returns explicit error
+
+* *GIVEN* the resolved URL is `https://github.com/acme/web.git`
+* *AND* `/etc/ghbrk/credentials/alice/token` does not exist
+* *WHEN* the injector prepares the child environment
+* *THEN* the injector MUST return an error indicating the token is missing for user `alice`
+
+### Scenario: Credential file with permissive mode is rejected
+
+* *GIVEN* `/etc/ghbrk/credentials/alice/id_rsa` exists with mode `0644`
+* *WHEN* the injector prepares the child environment
+* *THEN* the injector MUST return an error indicating the credential mode is too permissive
+* *AND* the injector MUST NOT pass the path to the child
+
+### Scenario: Token contents are not logged
+
+* *GIVEN* tracing is configured at debug level
+* *WHEN* the injector prepares a child environment containing a token
+* *THEN* the token contents MUST NOT appear in any tracing event
