@@ -1,0 +1,3 @@
+# Create /run/ghbrk on every boot with the correct ownership and mode.
+# Mode 2750: setgid so socket inherits ghbrk-clients group; no world access.
+d /run/ghbrk 2750 ghbrk ghbrk-clients -

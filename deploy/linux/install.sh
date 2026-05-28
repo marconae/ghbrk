@@ -5,6 +5,8 @@ BINARY_SRC="./target/release/ghbrk"
 BINARY_DST="/usr/local/bin/ghbrk"
 SERVICE_SRC="$(dirname "$0")/ghbrk.service"
 SERVICE_DST="/etc/systemd/system/ghbrk.service"
+TMPFILES_SRC="$(dirname "$0")/ghbrk.tmpfiles"
+TMPFILES_DST="/etc/tmpfiles.d/ghbrk.conf"
 POLICY_SRC="$(dirname "$0")/../../config/policy.example.yaml"
 POLICY_DST="/etc/ghbrk/policy.yaml"
 CONFIG_SRC="$(dirname "$0")/../../config/config.example.yaml"
@@ -65,7 +67,6 @@ done
 # ---------------------------------------------------------------------------
 install -d -m 0755 /etc/ghbrk
 install -d -m 0700 -o ghbrk -g ghbrk /etc/ghbrk/credentials
-install -d -m 2750 -o ghbrk -g ghbrk-clients /var/run/ghbrk
 install -d -m 0750 -o ghbrk -g ghbrk-clients /var/log/ghbrk
 
 # ---------------------------------------------------------------------------
@@ -89,16 +90,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Install systemd unit
+# 7. Install systemd unit and tmpfiles snippet
 # ---------------------------------------------------------------------------
 install -m 0644 -o root -g root "$SERVICE_SRC" "$SERVICE_DST"
 echo "Installed systemd unit to $SERVICE_DST"
+install -m 0644 -o root -g root "$TMPFILES_SRC" "$TMPFILES_DST"
+echo "Installed tmpfiles snippet to $TMPFILES_DST"
 
 # ---------------------------------------------------------------------------
-# 8. Reload systemd daemon, enable, and (re)start the service if available
+# 8. Create /run/ghbrk now and reload/enable/restart the service
 # ---------------------------------------------------------------------------
 # restart starts the unit on first run and applies unit-file changes on re-runs.
 if command -v systemctl &>/dev/null; then
+    systemd-tmpfiles --create "$TMPFILES_DST"
     systemctl daemon-reload
     systemctl enable ghbrk
     systemctl restart ghbrk

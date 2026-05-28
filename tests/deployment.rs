@@ -63,13 +63,29 @@ fn systemd_unit_hardening_directives() {
 #[test]
 fn service_has_runtime_directory() {
     let service = read_service();
+    // RuntimeDirectory= creates a private namespace mount invisible to host processes;
+    // socket accessibility requires ReadWritePaths= on a host-created directory instead.
     assert!(
-        service.contains("RuntimeDirectory=ghbrk"),
-        "service must set RuntimeDirectory=ghbrk"
+        service.contains("ReadWritePaths=") && service.contains("/run/ghbrk"),
+        "service must expose /run/ghbrk via ReadWritePaths so the socket is visible to shim processes"
     );
     assert!(
-        service.contains("RuntimeDirectoryMode=2750"),
-        "service must set RuntimeDirectoryMode=2750"
+        !service.contains("RuntimeDirectory="),
+        "RuntimeDirectory= must not be used: it creates a namespace-private mount inaccessible to shims"
+    );
+}
+
+#[test]
+fn tmpfiles_snippet_creates_run_ghbrk() {
+    let tmpfiles = std::fs::read_to_string("deploy/linux/ghbrk.tmpfiles")
+        .expect("deploy/linux/ghbrk.tmpfiles must exist");
+    assert!(
+        tmpfiles.contains("d /run/ghbrk") && tmpfiles.contains("2750"),
+        "tmpfiles snippet must create /run/ghbrk with mode 2750"
+    );
+    assert!(
+        tmpfiles.contains("ghbrk-clients"),
+        "tmpfiles snippet must set group to ghbrk-clients"
     );
 }
 
@@ -113,8 +129,8 @@ fn install_creates_directories_with_modes() {
         "install.sh must create /etc/ghbrk/credentials"
     );
     assert!(
-        script.contains("/var/run/ghbrk"),
-        "install.sh must create /var/run/ghbrk"
+        script.contains("ghbrk.tmpfiles") || script.contains("tmpfiles"),
+        "install.sh must install the tmpfiles snippet to create /run/ghbrk"
     );
     assert!(
         script.contains("/var/log/ghbrk"),

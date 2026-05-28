@@ -9,17 +9,14 @@ Group=ghbrk-clients
 ExecStart=/usr/local/bin/ghbrk daemon
 Environment=GHBRK_POLICY=/etc/ghbrk/policy.yaml
 Environment=GHBRK_AUDIT_LOG=/var/log/ghbrk/audit.log
-Environment=GHBRK_SOCKET=/var/run/ghbrk/broker.sock
+Environment=GHBRK_SOCKET=/run/ghbrk/broker.sock
 Restart=on-failure
 RestartSec=5s
-RuntimeDirectory=ghbrk
-RuntimeDirectoryMode=2750
-
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
-ReadWritePaths=/var/log/ghbrk
+ReadWritePaths=/run/ghbrk /var/log/ghbrk
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
