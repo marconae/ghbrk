@@ -98,15 +98,17 @@ install -m 0644 -o root -g root "$TMPFILES_SRC" "$TMPFILES_DST"
 echo "Installed tmpfiles snippet to $TMPFILES_DST"
 
 # ---------------------------------------------------------------------------
-# 8. Create /run/ghbrk now and reload/enable/restart the service
+# 8. Create /run/ghbrk and start the service
 # ---------------------------------------------------------------------------
-# restart starts the unit on first run and applies unit-file changes on re-runs.
+# Stop first so any RuntimeDirectory= cleanup from the old unit happens before
+# we create /run/ghbrk; otherwise restart would delete the directory on stop.
 if command -v systemctl &>/dev/null; then
-    systemd-tmpfiles --create "$TMPFILES_DST"
+    systemctl stop ghbrk 2>/dev/null || true
     systemctl daemon-reload
+    systemd-tmpfiles --create "$TMPFILES_DST"
     systemctl enable ghbrk
-    systemctl restart ghbrk
-    echo "ghbrk service reloaded, enabled, and restarted."
+    systemctl start ghbrk
+    echo "ghbrk service enabled and started."
 fi
 
 # ---------------------------------------------------------------------------

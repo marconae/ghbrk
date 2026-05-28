@@ -217,8 +217,8 @@ fn install_enables_service() {
         "install.sh must enable the ghbrk service with 'systemctl enable ghbrk'"
     );
     assert!(
-        script.contains("systemctl restart ghbrk"),
-        "install.sh must restart the ghbrk service with 'systemctl restart ghbrk'"
+        script.contains("systemctl start ghbrk") || script.contains("systemctl restart ghbrk"),
+        "install.sh must start the ghbrk service"
     );
 }
 
