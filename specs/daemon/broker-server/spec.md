@@ -4,7 +4,7 @@ Provides the `ghbrk daemon` Unix socket server that accepts shim connections, id
 
 ## Background
 
-The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-clients`. Linux only — peer credential reading uses `SO_PEERCRED`. Each accepted connection is handled by an independent Tokio task. The daemon must remain running across malformed-request errors and child process failures; it only exits on SIGINT, SIGTERM, or fatal bind errors.
+The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-clients`. The supported deployment sets the daemon's primary group to `ghbrk-clients` via the systemd unit's `Group=ghbrk-clients` directive, so the socket inherits the correct group on `bind(2)` without requiring a runtime `chown`. A defence-in-depth `chown` remains for daemons started outside systemd or with a non-standard `Group=`; when that chown fails, the daemon logs at `error` level with diagnostic guidance. Linux only — peer credential reading uses `SO_PEERCRED`. Each accepted connection is handled by an independent Tokio task. The daemon must remain running across malformed-request errors and child process failures; it only exits on SIGINT, SIGTERM, or fatal bind errors.
 
 ## Scenarios
 
@@ -15,6 +15,10 @@ The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-
 * *THEN* the daemon MUST create `/var/run/ghbrk/broker.sock`
 * *AND* the socket file mode MUST be `0660`
 * *AND* the socket file group MUST be `ghbrk-clients` when that group exists
+* *AND* when the daemon's primary group is already `ghbrk-clients`, the socket MUST inherit that group on `bind(2)` without requiring a subsequent `chown` for correctness
+* *AND* when the daemon's primary group is not `ghbrk-clients`, the daemon MUST attempt to `chown` the socket to the `ghbrk-clients` group as a defence-in-depth check
+* *AND* if that defence-in-depth `chown` fails, the daemon MUST log the failure at `error` level (not `warn`)
+* *AND* the error message MUST name the systemd `Group=ghbrk-clients` directive in `deploy/linux/ghbrk.service` as the supported fix so an operator reading `journalctl -u ghbrk` can locate the misconfiguration without consulting the source
 
 ### Scenario: Daemon refuses to start when socket path already exists with active listener
 

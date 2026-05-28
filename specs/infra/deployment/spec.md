@@ -1,26 +1,12 @@
 # Feature: deployment
 
-Provides the artefacts an operator needs to install and run ghbrk on a Linux host: a systemd unit file, an installation script, an annotated example policy, and a `cargo deny` configuration that enforces the MIT-only dependency policy.
+Provides the artefacts an operator needs to install and run ghbrk on a Linux host: an installation script, an annotated example policy, and a `cargo deny` configuration that enforces the MIT-only dependency policy. Systemd unit behaviour is specified separately in `infra/systemd-unit`.
 
 ## Background
 
-Targets Linux only in v1. The install script creates the `ghbrk` system user and `ghbrk-clients` group, places the binary, creates `/etc/ghbrk/`, `/etc/ghbrk/credentials/`, `/var/run/ghbrk/`, and `/var/log/ghbrk/` with correct ownership and permissions, and installs the systemd unit. The `cargo deny` config rejects any GPL/AGPL/LGPL/SSPL licensed dependency.
+Targets Linux only in v1. The install script creates the `ghbrk` system user and `ghbrk-clients` group, places the binary at `/usr/local/bin/ghbrk`, creates `/etc/ghbrk/`, `/etc/ghbrk/credentials/`, and `/var/log/ghbrk/` with correct ownership and permissions, joins both the `ghbrk` system user and the invoking `$SUDO_USER` into `ghbrk-clients`, installs the systemd unit, enables and restarts the service, and creates `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks to the ghbrk binary so PATH-resolved `git`/`gh` invocations route through the shim. The `cargo deny` config rejects any GPL/AGPL/LGPL/SSPL licensed dependency.
 
 ## Scenarios
-
-### Scenario: systemd unit starts the daemon as the ghbrk user
-
-* *GIVEN* the systemd unit `deploy/linux/ghbrk.service` is installed
-* *WHEN* an operator runs `systemctl start ghbrk`
-* *THEN* the unit MUST start `/usr/local/bin/ghbrk daemon`
-* *AND* the unit MUST run as `User=ghbrk`
-* *AND* the unit MUST have `Group=ghbrk`
-
-### Scenario: systemd unit has hardening directives
-
-* *GIVEN* the systemd unit file
-* *WHEN* an operator inspects it
-* *THEN* the unit MUST include at minimum `ProtectSystem=strict`, `NoNewPrivileges=true`, and `PrivateTmp=true`
 
 ### Scenario: install.sh creates ghbrk system user
 
@@ -35,14 +21,19 @@ Targets Linux only in v1. The install script creates the `ghbrk` system user and
 * *WHEN* `install.sh` completes successfully
 * *THEN* `/etc/ghbrk/` MUST exist with mode `0750` and owner `ghbrk:ghbrk`
 * *AND* `/etc/ghbrk/credentials/` MUST exist with mode `0700` and owner `ghbrk:ghbrk`
-* *AND* `/var/run/ghbrk/` MUST exist with mode `0755` and owner `ghbrk:ghbrk-clients`
+* *AND* `/var/log/ghbrk/` MUST exist with mode `0750` and owner `ghbrk:ghbrk-clients`
+* *AND* `/var/run/ghbrk/` MAY be created by `install.sh` for non-systemd direct-launch use, but at runtime under systemd the directory MUST be created by the unit's `RuntimeDirectory=ghbrk` directive with owner `ghbrk:ghbrk-clients` and mode `2750`, so the directory survives reboots without operator intervention
 
 ### Scenario: install.sh is idempotent on second run
 
-* *GIVEN* `install.sh` was already run successfully
+* *GIVEN* `install.sh` was already run successfully on this host
 * *WHEN* the operator runs `install.sh` a second time
 * *THEN* the script MUST exit zero
-* *AND* the script MUST NOT report a fatal error about existing user or directories
+* *AND* the script MUST NOT report a fatal error about existing user, group, directories, or symlinks
+* *AND* the script MUST NOT report a fatal error when `usermod -aG ghbrk-clients ghbrk` is invoked a second time
+* *AND* the script MUST NOT report a fatal error when `usermod -aG ghbrk-clients "$SUDO_USER"` is invoked a second time
+* *AND* the script MUST NOT report a fatal error when `systemctl enable ghbrk` is invoked against an already-enabled unit
+* *AND* the script MUST `systemctl restart ghbrk` (rather than `start`) so a second run picks up any unit changes without failing on "already running"
 
 ### Scenario: Example policy YAML is loadable by the policy engine
 
@@ -86,3 +77,30 @@ Targets Linux only in v1. The install script creates the `ghbrk` system user and
 * *THEN* the script MUST NOT silently delete or replace the existing regular file
 * *AND* the script MUST print a clear warning indicating the conflict
 * *AND* the script MUST continue with the remaining install steps
+
+### Scenario: install.sh adds ghbrk user to ghbrk-clients group
+
+* *GIVEN* a Linux host where the `ghbrk` user and the `ghbrk-clients` group have just been created by `install.sh`
+* *WHEN* `install.sh` reaches the group-membership step
+* *THEN* the script MUST run `usermod -aG ghbrk-clients ghbrk`
+* *AND* the `usermod` invocation MUST use the `-a` (append) flag so the `ghbrk` user's existing supplementary groups are preserved
+* *AND* the script MUST echo a confirmation line indicating the `ghbrk` user has been added to `ghbrk-clients`
+
+### Scenario: install.sh enables and starts the daemon
+
+* *GIVEN* a Linux host running systemd where `install.sh` has placed the binary and the unit file
+* *WHEN* `install.sh` reaches the service-activation step
+* *THEN* the script MUST run `systemctl daemon-reload`
+* *AND* the script MUST run `systemctl enable ghbrk`
+* *AND* the script MUST run `systemctl restart ghbrk` (rather than `systemctl start`) so re-runs after editing the unit pick up the new directives without erroring on "already running"
+* *AND* the script MUST guard the `systemctl` calls behind `command -v systemctl &>/dev/null` so non-systemd hosts do not fail
+* *AND* the closing banner MUST describe what the script did (service is enabled and running) rather than instructing the operator to run `systemctl enable`/`start` manually
+
+### Scenario: install.sh adds the installing user to ghbrk-clients
+
+* *GIVEN* `install.sh` is invoked via `sudo` so the environment variable `SUDO_USER` is set to a non-empty username
+* *WHEN* the script reaches the group-membership step
+* *THEN* the script MUST run `usermod -aG ghbrk-clients "$SUDO_USER"`
+* *AND* the script MUST print a notice that the operator SHALL log out and back in (or run `newgrp ghbrk-clients`) for the supplementary group membership to take effect in their existing shell sessions
+* *AND* when `$SUDO_USER` is unset or empty (the script was run as actual root rather than via `sudo`), the script MUST instead print a clear manual-add instruction telling the operator which command to run to add their user to the `ghbrk-clients` group
+* *AND* the script MUST NOT abort if `usermod -aG ghbrk-clients "$SUDO_USER"` is run a second time against a user already in the group
