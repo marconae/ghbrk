@@ -55,10 +55,10 @@ fn ghbrk_git_subcommand_enters_shim() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = missing_socket_path(&tmp);
     let out = Command::new(bin())
-        .arg("git")
+        .args(["git", "push", "origin", "main"])
         .env("GHBRK_SOCKET", &socket)
         .output()
-        .expect("failed to run ghbrk git");
+        .expect("failed to run ghbrk git push");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
@@ -76,10 +76,10 @@ fn ghbrk_gh_subcommand_enters_shim() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = missing_socket_path(&tmp);
     let out = Command::new(bin())
-        .arg("gh")
+        .args(["gh", "pr", "create"])
         .env("GHBRK_SOCKET", &socket)
         .output()
-        .expect("failed to run ghbrk gh");
+        .expect("failed to run ghbrk gh pr create");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
@@ -99,9 +99,10 @@ fn argv0_git_symlink_enters_shim() {
     symlink(bin(), &link).expect("symlink");
     let socket = missing_socket_path(&tmp);
     let out = Command::new(&link)
+        .args(["push", "origin", "main"])
         .env("GHBRK_SOCKET", &socket)
         .output()
-        .expect("failed to run git symlink");
+        .expect("failed to run git symlink push");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
@@ -121,9 +122,10 @@ fn argv0_gh_symlink_enters_shim() {
     symlink(bin(), &link).expect("symlink");
     let socket = missing_socket_path(&tmp);
     let out = Command::new(&link)
+        .args(["pr", "create"])
         .env("GHBRK_SOCKET", &socket)
         .output()
-        .expect("failed to run gh symlink");
+        .expect("failed to run gh symlink pr create");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
