@@ -43,20 +43,20 @@ macOS is not supported in v1.
 ```bash
 cargo build --release
 sudo ./deploy/linux/install.sh
-sudo systemctl enable --now ghbrk
 ```
 
 The install script (idempotent; safe to re-run):
 
 1. Creates system user `ghbrk` (no login shell) and group `ghbrk-clients`
-2. Installs the binary to `/usr/local/bin/ghbrk`
+2. Installs the binary to `/usr/local/bin/ghbrk`; creates `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks pointing at it
 3. Creates directories with strict permissions:
    - `/etc/ghbrk/credentials/` — mode `0700`, owned by `ghbrk`
-   - `/var/run/ghbrk/` — mode `0750`, group `ghbrk-clients`
+   - `/run/ghbrk/` — mode `2750`, group `ghbrk-clients`; managed by `systemd-tmpfiles` at every boot via `/etc/tmpfiles.d/ghbrk.conf`
    - `/var/log/ghbrk/` — mode `0750`, group `ghbrk-clients`
 4. Writes a starter policy to `/etc/ghbrk/policy.yaml` if one does not exist
 5. Writes a starter shim config to `/etc/ghbrk/config.yaml` if one does not exist
-6. Installs the systemd unit and reloads the daemon
+6. Installs the systemd unit and `tmpfiles.d` snippet; enables and starts the service
+7. Adds `$SUDO_USER` to `ghbrk-clients` (effective at next login)
 
 Check the service:
 
@@ -150,21 +150,7 @@ Set these only if your system installs the binaries at non-standard paths (e.g. 
 
 ## Agent setup
 
-Place `git` and `gh` symlinks that resolve to the `ghbrk` binary early in the agent's `PATH`. When invoked via a symlink named `git` or `gh`, `ghbrk` detects this automatically and routes to the broker.
-
-```bash
-mkdir -p ~/.local/bin
-ln -sf /usr/local/bin/ghbrk ~/.local/bin/git
-ln -sf /usr/local/bin/ghbrk ~/.local/bin/gh
-```
-
-In the agent's environment (e.g. Claude Code's `env` configuration):
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-On hosts where `install.sh` has been run, system-wide `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks already point at the `ghbrk` binary. Because `/usr/local/bin` precedes `/usr/bin` in the standard system `PATH`, these callers do not need per-user shim placement — the symlinks are picked up automatically.
+`install.sh` creates system-wide `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks pointing at the `ghbrk` binary. Because `/usr/local/bin` precedes `/usr/bin` in the standard system `PATH`, any agent process picks up the shim automatically — no per-user `PATH` changes needed.
 
 The agent must also be a member of the `ghbrk-clients` group so it can reach the socket:
 
@@ -175,7 +161,7 @@ sudo usermod -aG ghbrk-clients alice
 To verify the shim is active in the agent's session:
 
 ```bash
-which git   # should print ~/.local/bin/git
+which git   # should print /usr/local/bin/git
 git status  # passes through to the real git; no broker contact required
 ```
 

@@ -22,7 +22,7 @@ Targets Linux only in v1. The install script creates the `ghbrk` system user and
 * *THEN* `/etc/ghbrk/` MUST exist with mode `0750` and owner `ghbrk:ghbrk`
 * *AND* `/etc/ghbrk/credentials/` MUST exist with mode `0700` and owner `ghbrk:ghbrk`
 * *AND* `/var/log/ghbrk/` MUST exist with mode `0750` and owner `ghbrk:ghbrk-clients`
-* *AND* `/var/run/ghbrk/` MAY be created by `install.sh` for non-systemd direct-launch use, but at runtime under systemd the directory MUST be created by the unit's `RuntimeDirectory=ghbrk` directive with owner `ghbrk:ghbrk-clients` and mode `2750`, so the directory survives reboots without operator intervention
+* *AND* `/run/ghbrk/` MUST be created by `systemd-tmpfiles` at every boot via `/etc/tmpfiles.d/ghbrk.conf` (deployed by `install.sh` from `deploy/linux/ghbrk.tmpfiles`), with owner `ghbrk:ghbrk-clients` and mode `2750`; the unit exposes it via `ReadWritePaths=/run/ghbrk` so the socket is visible to host-namespace processes
 
 ### Scenario: install.sh is idempotent on second run
 
