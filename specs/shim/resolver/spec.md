@@ -4,7 +4,7 @@ Maps the shim request `(tool, args, cwd)` to a normalised `(operation, org, repo
 
 ## Background
 
-For `git`, the resolver reads `<cwd>/.git/config` (or walks upward) to find the `remote.origin.url`, parses it, and extracts org and repo. For `gh`, the resolver inspects subcommand args (e.g. `gh pr create -R acme/web` or current cwd's git remote). Branch resolution for `git push` reads the local refspec or `HEAD`. Read-side git operations (`fetch`, `clone`, `pull`) do not populate a branch — the policy decides at the operation level. Only GitHub URLs are recognised; other forges produce an error.
+For `git`, the resolver reads `<cwd>/.git/config` (or walks upward) to find the `remote.origin.url`, parses it, and extracts org and repo. For `gh`, the resolver inspects subcommand args (e.g. `gh pr create -R acme/web` or current cwd's git remote). Branch resolution for `git push` reads the local refspec or `HEAD`. Read-side git operations (`fetch`, `clone`, `pull`) do not populate a branch — the policy decides at the operation level. The `gh api <path>` operation is user-scoped: it carries the raw API path and does not require a GitHub remote, so org and repo are left unset (matched as wildcard by the policy). Only GitHub URLs are recognised; other forges produce an error.
 
 ## Scenarios
 
@@ -82,3 +82,23 @@ For `git`, the resolver reads `<cwd>/.git/config` (or walks upward) to find the 
 * *GIVEN* `cwd` is `/tmp` and contains no git repo
 * *WHEN* the resolver processes `git pull`
 * *THEN* the resolver MUST return an error indicating no repository was found
+
+### Scenario: Resolve gh api to a read operation carrying the path
+
+* *GIVEN* the args are `gh api user`
+* *WHEN* the resolver processes the request
+* *THEN* the resolver MUST produce an operation `gh_api_read` carrying the API path `user`
+* *AND* the resolver MUST NOT require a GitHub remote in `cwd`
+* *AND* the resolver MUST leave org and repo unset (matched as wildcard by the policy)
+
+### Scenario: Resolve gh api with a nested path
+
+* *GIVEN* the args are `gh api repos/acme/web`
+* *WHEN* the resolver processes the request
+* *THEN* the resolver MUST produce an operation `gh_api_read` carrying the API path `repos/acme/web`
+
+### Scenario: gh api with no path is rejected
+
+* *GIVEN* the args are `gh api`
+* *WHEN* the resolver processes the request
+* *THEN* the resolver MUST return an error indicating the API path is missing

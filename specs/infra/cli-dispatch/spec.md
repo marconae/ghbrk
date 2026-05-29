@@ -1,10 +1,10 @@
 # Feature: cli-dispatch
 
-Routes the single `ghbrk` binary to daemon mode or shim mode based on subcommand and argv[0], so that one installed artefact serves both the broker server and the transparent `git`/`gh` shims.
+Routes the single `ghbrk` binary to daemon mode, the health-check command, or shim mode based on subcommand and argv[0], so that one installed artefact serves the broker server, the `ghbrk check` diagnostics, and the transparent `git`/`gh` shims.
 
 ## Background
 
-The binary is built from a single Rust crate. argv[0] inspection happens before clap parsing. Recognised shim names are exactly `git` and `gh`; any other argv[0] basename falls through to clap subcommand dispatch.
+The binary is built from a single Rust crate. argv[0] inspection happens before clap parsing. Recognised shim names are exactly `git` and `gh`; any other argv[0] basename falls through to clap subcommand dispatch. The clap subcommand set is `daemon`, `check`, `git`, and `gh`.
 
 ## Scenarios
 
@@ -56,5 +56,5 @@ The binary is built from a single Rust crate. argv[0] inspection happens before 
 
 * *GIVEN* the binary is installed at `/usr/local/bin/ghbrk`
 * *WHEN* the user runs `ghbrk --help`
-* *THEN* the process MUST print a help message listing the `daemon`, `git`, and `gh` subcommands
+* *THEN* the process MUST print a help message listing the `daemon`, `check`, `git`, and `gh` subcommands
 * *AND* the process MUST exit with status zero

@@ -4,12 +4,7 @@ Lets the `git` and `gh` shims run local and unsupported subcommands directly aga
 
 ## Background
 
-The shim is invoked as `git` or `gh` (via symlink or `ghbrk git` / `ghbrk gh`). Before any broker contact, the shim inspects the arguments and decides between two paths: broker-mediated execution for known remote operations, or direct passthrough for everything else. The broker-handled sets are fixed:
-
-- **git:** `push`, `fetch`, `clone`, `pull`
-- **gh:** `(pr, create)`, `(pr, comment)`, `(pr, merge)`, `(pr, close)`, `(pr, review)`, `(issue, create)`, `(issue, comment)`, `(issue, close)`, `(release, create)`
-
-The first non-flag token is the git subcommand; the first two positional tokens are the gh `(group, action)` pair. Passthrough replaces the current process image via `exec()` so all stdio, signals, and the exit code are preserved with no buffering. The real binary path comes from shim configuration (see feature `ghbrk/shim-config`).
+The shim is invoked as `git` or `gh` (via symlink or `ghbrk git` / `ghbrk gh`). Before any broker contact, the shim inspects the arguments and decides between two paths: broker-mediated execution for known remote operations, or direct passthrough for everything else. The broker-handled `gh` set now includes `(api, <path>)` in addition to the existing `pr`/`issue`/`release` operations, so `gh api` calls are policy-gated and credential-injected rather than passed through. The first non-flag token is the git subcommand; the first two positional tokens are the gh `(group, action)` pair. Passthrough replaces the current process image via `exec()` so all stdio, signals, and the exit code are preserved with no buffering.
 
 ## Scenarios
 
@@ -123,3 +118,11 @@ The first non-flag token is the git subcommand; the first two positional tokens 
 * *THEN* the shim MUST print a connection-error message naming the socket path to stderr
 * *AND* the shim MUST exit with the shim-error exit code
 * *AND* the shim MUST NOT exec the real binary
+
+### Scenario: gh api subcommand is routed to the broker
+
+* *GIVEN* the shim is invoked as `gh api user`
+* *WHEN* the shim evaluates the passthrough decision
+* *THEN* the shim MUST classify the invocation as broker-mediated
+* *AND* the shim MUST attempt to connect to the broker socket
+* *AND* the shim MUST NOT exec the real gh binary directly

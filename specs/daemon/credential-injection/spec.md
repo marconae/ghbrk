@@ -1,10 +1,10 @@
 # Feature: credential-injection
 
-Selects and injects credentials into the spawned `git` or `gh` child process so the agent never sees the secret material directly. Selection is based on the resolved remote URL scheme.
+Selects and injects the correct stored credential (SSH key or token) into the child process environment for each resolved request, so that the agent never sees the raw credential while the executed git/gh command still authenticates as the broker-managed user.
 
 ## Background
 
-Credentials live under `/etc/ghbrk/credentials/<username>/` owned by the `ghbrk` user with mode `0600`. Two files are recognised: `id_rsa` (SSH private key) and `token` (HTTPS / GH API token). The daemon process must have read access; agent processes must not. The injection function returns a set of environment variables to be applied to the child's environment.
+Credentials live under `/etc/ghbrk/credentials/<user>/` owned by the `ghbrk` user with mode `0600`. Two files are recognised: `id_rsa` (SSH private key) and `token` (HTTPS / GH API token). The daemon process must have read access; agent processes must not. The injection function returns a set of environment variables to be applied to the child's environment. For any `gh` invocation — including the `gh_api_read` operation backing `gh api` — the injector sets `GH_TOKEN` from the token file contents.
 
 ## Scenarios
 
@@ -56,3 +56,11 @@ Credentials live under `/etc/ghbrk/credentials/<username>/` owned by the `ghbrk`
 * *GIVEN* tracing is configured at debug level
 * *WHEN* the injector prepares a child environment containing a token
 * *THEN* the token contents MUST NOT appear in any tracing event
+
+### Scenario: gh api request receives GH_TOKEN
+
+* *GIVEN* the request tool is `gh` for a `gh_api_read` operation
+* *AND* the token file exists for the caller with mode `0600`
+* *WHEN* the injector prepares the child environment
+* *THEN* the environment MUST set `GH_TOKEN` to the token file contents
+* *AND* the token contents MUST NOT appear on the child's argv
