@@ -55,3 +55,10 @@ Frames are length-prefixed: a 4-byte big-endian unsigned integer giving payload 
 * *AND* only 40 bytes of payload follow before EOF
 * *WHEN* the decoder attempts to read the frame
 * *THEN* the decoder MUST return a parse error indicating truncation
+
+### Scenario: Check request frame round-trips with the check tool discriminant
+
+* *GIVEN* a `Request { tool: check, args: [], cwd: "/home/alice" }`
+* *WHEN* the request is encoded to bytes and decoded back
+* *THEN* the decoded value MUST equal the original
+* *AND* the encoded `tool` discriminant field MUST be the string `"check"`

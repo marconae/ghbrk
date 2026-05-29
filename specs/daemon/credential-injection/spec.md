@@ -4,7 +4,7 @@ Selects and injects the correct stored credential (SSH key or token) into the ch
 
 ## Background
 
-Credentials live under `/etc/ghbrk/credentials/<user>/` owned by the `ghbrk` user with mode `0600`. Two files are recognised: `id_rsa` (SSH private key) and `token` (HTTPS / GH API token). The daemon process must have read access; agent processes must not. The injection function returns a set of environment variables to be applied to the child's environment. For any `gh` invocation — including the `gh_api_read` operation backing `gh api` — the injector sets `GH_TOKEN` from the token file contents.
+Credentials live under `/etc/ghbrk/credentials/<user>/` owned by the `ghbrk` user with mode `0600`. Two files are recognised: `id_rsa` (SSH private key) and `token` (HTTPS / GH API token). The daemon process must have read access; agent processes must not. The injection function returns a set of environment variables to be applied to the child's environment. For any `gh` invocation the injector sets `GH_TOKEN` from the token file contents — this applies both to policy-gated broker operations (`gh api`, `gh pr`, `gh issue`, `gh release`) and to passthrough `gh` invocations (e.g. `gh repo view`, `gh auth status`) that skip policy evaluation but are still executed by the broker so the token can be supplied.
 
 ## Scenarios
 
@@ -63,4 +63,14 @@ Credentials live under `/etc/ghbrk/credentials/<user>/` owned by the `ghbrk` use
 * *AND* the token file exists for the caller with mode `0600`
 * *WHEN* the injector prepares the child environment
 * *THEN* the environment MUST set `GH_TOKEN` to the token file contents
+* *AND* the token contents MUST NOT appear on the child's argv
+
+### Scenario: Passthrough gh invocation receives GH_TOKEN
+
+* *GIVEN* the request tool is `gh` with args `["repo", "view"]` that do not match any broker operation
+* *AND* `/etc/ghbrk/credentials/alice/token` exists with mode `0600`
+* *WHEN* the broker handles the passthrough invocation for user `alice`
+* *THEN* the broker MUST skip policy evaluation for the invocation
+* *AND* the environment MUST set `GH_TOKEN` to the token file contents
+* *AND* the broker MUST execute the real `gh` binary with the original arguments
 * *AND* the token contents MUST NOT appear on the child's argv

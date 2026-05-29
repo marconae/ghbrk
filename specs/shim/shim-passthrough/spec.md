@@ -4,7 +4,7 @@ Lets the `git` and `gh` shims run local and unsupported subcommands directly aga
 
 ## Background
 
-The shim is invoked as `git` or `gh` (via symlink or `ghbrk git` / `ghbrk gh`). Before any broker contact, the shim inspects the arguments and decides between two paths: broker-mediated execution for known remote operations, or direct passthrough for everything else. The broker-handled `gh` set now includes `(api, <path>)` in addition to the existing `pr`/`issue`/`release` operations, so `gh api` calls are policy-gated and credential-injected rather than passed through. The first non-flag token is the git subcommand; the first two positional tokens are the gh `(group, action)` pair. Passthrough replaces the current process image via `exec()` so all stdio, signals, and the exit code are preserved with no buffering.
+The shim is invoked as `git` or `gh` (via symlink or `ghbrk git` / `ghbrk gh`). The shim no longer decides the passthrough/broker split for `gh` locally: every `gh` invocation is sent to the broker so the broker can inject `GH_TOKEN` even for informational commands the agent could not otherwise authenticate. The broker performs the broker-op classification on its side — policy-gated execution for known remote operations (`pr`/`issue`/`release`/`api`), and credential-injected passthrough for everything else. For `git`, the shim still classifies locally: the first non-flag token is the git subcommand; local subcommands (e.g. `status`) are exec'd directly and remote ones (`push`/`fetch`/`pull`/`clone`) are routed to the broker. When the shim does exec a real binary directly, it replaces the current process image via `exec()` so all stdio, signals, and the exit code are preserved with no buffering. If the broker socket connect returns `EACCES`, the shim falls back to exec'ing the real binary directly with no credential injection.
 
 ## Scenarios
 
@@ -39,14 +39,14 @@ The shim is invoked as `git` or `gh` (via symlink or `ghbrk git` / `ghbrk gh`). 
 * *THEN* the shim MUST treat `push` as the subcommand
 * *AND* the shim MUST classify the invocation as broker-mediated
 
-### Scenario: Informational gh command passes through to the real binary
+### Scenario: Informational gh command is routed to the broker for credential injection
 
 * *GIVEN* the shim is invoked as `gh auth status`
-* *AND* the resolved real gh binary exists at the configured path
-* *WHEN* the shim evaluates the passthrough decision
-* *THEN* the shim MUST classify the invocation as passthrough
-* *AND* the shim MUST exec the real gh binary with the original arguments
-* *AND* the shim MUST NOT open a connection to the broker socket
+* *AND* the agent's environment contains no `GH_TOKEN`
+* *WHEN* the shim evaluates the connection decision
+* *THEN* the shim MUST attempt to connect to the broker socket
+* *AND* the shim MUST NOT exec the real gh binary directly
+* *AND* the broker MUST inject `GH_TOKEN` before executing the real gh binary
 
 ### Scenario: Known remote gh operation is routed to the broker
 
@@ -56,12 +56,14 @@ The shim is invoked as `git` or `gh` (via symlink or `ghbrk git` / `ghbrk gh`). 
 * *AND* the shim MUST attempt to connect to the broker socket
 * *AND* the shim MUST NOT exec the real gh binary directly
 
-### Scenario: Unknown gh subcommand passes through
+### Scenario: Unknown gh subcommand is routed to the broker for credential injection
 
 * *GIVEN* the shim is invoked as `gh repo view`
-* *WHEN* the shim evaluates the passthrough decision
-* *THEN* the shim MUST classify the invocation as passthrough
-* *AND* the shim MUST exec the real gh binary with the original arguments
+* *AND* the agent's environment contains no `GH_TOKEN`
+* *WHEN* the shim evaluates the connection decision
+* *THEN* the shim MUST attempt to connect to the broker socket
+* *AND* the shim MUST NOT exec the real gh binary directly
+* *AND* the broker MUST inject `GH_TOKEN` before executing the real gh binary
 
 ### Scenario: Passthrough preserves the real binary exit code
 
