@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const HOST_PORT: u16 = 2222;
+const REAL_GIT: &str = "/usr/bin/git";
 const CONTAINER_NAME: &str = "ghbrk-it-git-server";
 const DEVENV_CONTAINER: &str = "ghbrk-it-devenv";
 const REMOTE_ORG: &str = "test-org";
@@ -493,7 +494,7 @@ fn list_remote_main(private_key_path: &Path) -> Option<String> {
         private_key_path.display(),
         HOST_PORT
     );
-    let out = Command::new("git")
+    let out = Command::new(REAL_GIT)
         .args([
             "ls-remote",
             "ssh://git@localhost/home/git/repos/test.git",
@@ -768,7 +769,7 @@ fn seed_initial_commit(ssh: &SshHarness) {
         &["commit", "--allow-empty", "-m", "init"],
     ];
     for args in runs {
-        let out = Command::new("git")
+        let out = Command::new(REAL_GIT)
             .args(args.iter().copied())
             .current_dir(&work)
             .output()
@@ -789,7 +790,7 @@ fn seed_initial_commit(ssh: &SshHarness) {
             "main:refs/heads/main",
         ][..],
     ] {
-        let out = Command::new("git")
+        let out = Command::new(REAL_GIT)
             .args(args.iter().copied())
             .current_dir(&work)
             .env("GIT_SSH_COMMAND", &ssh_cmd)

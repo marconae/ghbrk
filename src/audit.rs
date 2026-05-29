@@ -17,6 +17,7 @@ pub const DEFAULT_AUDIT_PATH: &str = "/var/log/ghbrk/audit.log";
 pub enum AuditDecision {
     Allow,
     Deny { reason: String },
+    Passthrough,
 }
 
 /// One auditable event: the broker's view of a single request and decision.
@@ -200,6 +201,14 @@ mod tests {
             let _: serde_json::Value =
                 serde_json::from_str(line).expect("each line must parse as JSON");
         }
+    }
+
+    #[test]
+    fn passthrough_serializes_to_passthrough_decision() {
+        let record = sample_record(AuditDecision::Passthrough);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["decision"], "passthrough");
+        assert!(json.get("reason").is_none());
     }
 
     #[test]

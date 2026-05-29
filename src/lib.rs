@@ -3,6 +3,7 @@ pub mod broker;
 pub mod config;
 pub mod credentials;
 pub mod executor;
+pub mod health_check;
 pub mod passthrough;
 pub mod policy;
 pub mod protocol;

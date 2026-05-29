@@ -30,7 +30,10 @@ fn git_is_broker_op(args: &[String]) -> bool {
     )
 }
 
-fn gh_is_broker_op(args: &[String]) -> bool {
+/// Returns `true` when a `gh` invocation is a broker-mediated operation
+/// (subject to policy). When `false`, the broker treats it as a passthrough:
+/// it still injects `GH_TOKEN` but bypasses resolve and policy evaluation.
+pub fn gh_is_broker_op(args: &[String]) -> bool {
     let mut positional = args.iter().filter(|a| !a.starts_with('-'));
     let group = positional.next().map(String::as_str).unwrap_or("");
     let action = positional.next().map(String::as_str).unwrap_or("");
@@ -65,6 +68,7 @@ pub fn is_passthrough(tool: Tool, args: &[String]) -> bool {
     match tool {
         Tool::Git => !git_is_broker_op(args),
         Tool::Gh => !gh_is_broker_op(args),
+        Tool::Check => false,
     }
 }
 

@@ -14,6 +14,7 @@ pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 pub enum Tool {
     Git,
     Gh,
+    Check,
 }
 
 /// Request frame sent by the shim to the broker.
@@ -116,6 +117,19 @@ mod tests {
         write_frame(&mut buf, value).await.expect("encode");
         let mut cursor = Cursor::new(buf);
         read_frame(&mut cursor).await.expect("decode")
+    }
+
+    #[tokio::test]
+    async fn check_request_round_trips_with_check_discriminant() {
+        let req = Request {
+            tool: Tool::Check,
+            args: vec![],
+            cwd: PathBuf::from("/"),
+        };
+        let decoded: Request = round_trip(&req).await;
+        assert_eq!(decoded, req);
+        let json = serde_json::to_string(&Tool::Check).unwrap();
+        assert_eq!(json, r#""check""#);
     }
 
     #[tokio::test]

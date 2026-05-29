@@ -204,6 +204,12 @@ pub fn https_git_env(creds: &Credentials) -> Result<HttpsGitEnv, CredentialError
 /// would otherwise be dropped. It is forwarded here when present.
 pub fn gh_env(creds: &Credentials) -> Vec<(String, String)> {
     let mut env = vec![("GH_TOKEN".to_string(), creds.token.clone())];
+    // gh calls os.UserHomeDir() to locate its config dir. Forward the daemon's
+    // HOME so gh does not fall back to the ghbrk system user's passwd entry
+    // (which is /nonexistent for daemon accounts created with --no-create-home).
+    if let Ok(home) = std::env::var("HOME") {
+        env.push(("HOME".to_string(), home));
+    }
     if let Ok(host) = std::env::var("GH_HOST") {
         if !host.is_empty() {
             // For a non-github.com host, `gh` reads the token from
@@ -411,6 +417,39 @@ mod tests {
         };
         let env = gh_env(&creds);
         assert!(env.iter().all(|(k, _)| k != "GH_HOST"));
+    }
+
+    #[test]
+    fn gh_env_forwards_home_when_set() {
+        let _guard = GH_HOST_LOCK.lock().unwrap();
+        std::env::remove_var("GH_HOST");
+        std::env::set_var("HOME", "/run/ghbrk");
+        let creds = Credentials {
+            ssh_key_path: PathBuf::from("/x"),
+            token: "ghp_secret".into(),
+        };
+        let env = gh_env(&creds);
+        std::env::remove_var("HOME");
+        assert!(
+            env.iter().any(|(k, v)| k == "HOME" && v == "/run/ghbrk"),
+            "HOME must be forwarded to gh child processes"
+        );
+    }
+
+    #[test]
+    fn gh_env_omits_home_when_unset() {
+        let _guard = GH_HOST_LOCK.lock().unwrap();
+        std::env::remove_var("GH_HOST");
+        std::env::remove_var("HOME");
+        let creds = Credentials {
+            ssh_key_path: PathBuf::from("/x"),
+            token: "ghp_secret".into(),
+        };
+        let env = gh_env(&creds);
+        assert!(
+            env.iter().all(|(k, _)| k != "HOME"),
+            "HOME must be absent when not set in daemon environment"
+        );
     }
 
     #[test]

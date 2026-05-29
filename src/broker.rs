@@ -256,9 +256,23 @@ async fn process_request(
     audit: &Arc<AuditLogger>,
     credentials_root: Option<&Path>,
 ) -> Result<(), ConnectionError> {
+    // Short-circuit for Tool::Check — runs health checks as the broker user.
+    // No resolver, no policy evaluation, no audit record.
+    if request.tool == Tool::Check {
+        return handle_check_request(stream, username, credentials_root).await;
+    }
+
+    // `gh` passthrough invocations (anything that is not a broker-op, e.g.
+    // `gh repo view`, `gh auth status`) bypass resolve and policy but still
+    // receive `GH_TOKEN` injection so the wrapped `gh` is authenticated.
+    if request.tool == Tool::Gh && !crate::passthrough::gh_is_broker_op(&request.args) {
+        return handle_gh_passthrough(stream, &request, username, audit, credentials_root).await;
+    }
+
     let tool_name = match request.tool {
         Tool::Git => "git",
         Tool::Gh => "gh",
+        Tool::Check => unreachable!("Tool::Check is handled before resolve_request"),
     };
 
     // Resolve the request to (org, repo, branch, operation).
@@ -370,10 +384,79 @@ async fn process_request(
     Ok(())
 }
 
+async fn handle_gh_passthrough(
+    stream: &mut UnixStream,
+    request: &Request,
+    username: &str,
+    audit: &Arc<AuditLogger>,
+    credentials_root: Option<&Path>,
+) -> Result<(), ConnectionError> {
+    let creds = match load_user_credentials(username, credentials_root) {
+        Ok(c) => c,
+        Err(err) => {
+            let reason = format!("credentials: {err}");
+            send_denied(stream, &reason).await?;
+            return Ok(());
+        }
+    };
+
+    write_audit(
+        audit,
+        AuditEntry {
+            user: username,
+            tool: "gh",
+            args: &request.args,
+            org: "",
+            repo: "",
+            branch: None,
+            operation: "passthrough",
+            decision: AuditDecision::Passthrough,
+        },
+    )
+    .await;
+
+    let spec = ChildSpec {
+        program: "gh".to_string(),
+        args: request.args.clone(),
+        env: gh_env(&creds),
+        cwd: request.cwd.clone(),
+    };
+
+    if let Err(err) = stream_child(&spec, stream).await {
+        debug!(error = %err, "executor returned error");
+    }
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+async fn handle_check_request(
+    stream: &mut UnixStream,
+    username: &str,
+    credentials_root: Option<&Path>,
+) -> Result<(), ConnectionError> {
+    let creds_root = match credentials_root {
+        Some(r) => r.to_path_buf(),
+        None => crate::credentials::credentials_dir(),
+    };
+
+    let mut output: Vec<u8> = Vec::new();
+    let all_ok = crate::health_check::run_checks(&creds_root, username, &mut output);
+
+    if !output.is_empty() {
+        write_frame(stream, &ServerFrame::StdoutChunk { data: output }).await?;
+    }
+
+    let code = if all_ok { 0 } else { 1 };
+    write_frame(stream, &ServerFrame::Exit { code }).await?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
 fn resolve_request(request: &Request) -> Result<ResolvedRequest, ResolverError> {
     match request.tool {
         Tool::Git => resolve_git(&request.args, &request.cwd),
         Tool::Gh => resolve_gh(&request.args, &request.cwd),
+        Tool::Check => unreachable!("Tool::Check is handled before resolve_request"),
     }
 }
 
@@ -410,6 +493,7 @@ fn build_env(
                 Ok((vars, Some(env)))
             }
         },
+        Tool::Check => unreachable!("Tool::Check is handled before build_env"),
     }
 }
 

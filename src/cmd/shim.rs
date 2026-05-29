@@ -20,6 +20,11 @@ pub fn run_shim_blocking(tool: Tool, args: &[String]) -> ! {
     let real_path = match tool {
         Tool::Git => cfg.real_git,
         Tool::Gh => cfg.real_gh,
+        // `check` has no real binary to fall back to. If the broker socket is
+        // inaccessible (EACCES), the shim core exec's this path; a nonexistent
+        // path fails the exec and exits nonzero, which is the right signal that
+        // the caller is not a member of the broker's client group.
+        Tool::Check => "/nonexistent/ghbrk-check".to_string(),
     };
 
     let runtime = match tokio::runtime::Runtime::new() {

@@ -127,3 +127,70 @@ async fn gh_api_receives_gh_token() {
 
     handle.abort();
 }
+
+/// `gh repo view` is a passthrough (not a broker-op). It must still reach the
+/// broker, receive `GH_TOKEN`, and be recorded with `decision=passthrough` —
+/// even under a deny-everything policy, which passthrough bypasses.
+#[tokio::test]
+async fn gh_passthrough_repo_view_receives_token() {
+    let user = current_user();
+
+    let creds_root = TempDir::new().unwrap();
+    let user_dir = creds_root.path().join(&user);
+    std::fs::create_dir_all(&user_dir).unwrap();
+    write_mode(&user_dir.join("id_rsa"), "dummy-key", 0o600);
+    write_mode(&user_dir.join("token"), TOKEN, 0o600);
+
+    let bin_dir = TempDir::new().unwrap();
+    install_stub_gh(bin_dir.path());
+
+    let run_dir = TempDir::new().unwrap();
+    let socket_path = run_dir.path().join("broker.sock");
+    let audit_path = run_dir.path().join("audit.log");
+    let logger = Arc::new(AuditLogger::new(&audit_path).unwrap());
+    let config = BrokerConfig {
+        socket_path: socket_path.clone(),
+        // Empty policy: passthrough must bypass policy entirely.
+        policy: Policy::from_yaml("rules: []").unwrap(),
+        audit_logger: logger,
+        credentials_root: Some(creds_root.path().to_path_buf()),
+    };
+    let handle = tokio::spawn(async move {
+        let _ = run_broker(config).await;
+    });
+
+    for _ in 0..200 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(socket_path.exists(), "broker socket did not appear");
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Gh,
+        args: vec!["repo".into(), "view".into()],
+        cwd: PathBuf::from("/"),
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+
+    let stdout = collect_stdout(&mut stream).await;
+    assert_eq!(
+        stdout,
+        format!("argv=repo view GH_TOKEN={TOKEN}"),
+        "passthrough gh did not receive injected GH_TOKEN; got {stdout:?}"
+    );
+
+    handle.abort();
+
+    let audit_body = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(
+        audit_body.contains(r#""decision":"passthrough""#),
+        "expected passthrough decision in audit log; got: {audit_body}"
+    );
+    assert!(
+        !audit_body.contains(TOKEN),
+        "audit log must never contain the token; got: {audit_body}"
+    );
+}
