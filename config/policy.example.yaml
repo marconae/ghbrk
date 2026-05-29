@@ -12,10 +12,11 @@
 #   effect     - "allow" or "deny"
 #
 # Available operations:
-#   push, fetch, clone
+#   push, fetch, pull, clone
 #   pr_open, pr_comment, pr_close, pr_merge, pr_review
 #   issue_open, issue_comment, issue_close
 #   release_create
+#   gh_api_read  (GET-only GitHub REST API calls via `gh api`)
 
 rules:
   # -------------------------------------------------------------------------

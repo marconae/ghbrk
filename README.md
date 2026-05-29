@@ -170,7 +170,7 @@ If the broker socket is not at the default path, set `GHBRK_SOCKET` in the agent
 
 ## Command routing
 
-The shim makes a routing decision before contacting the broker. Commands that do not require broker involvement are passed directly to the real binary via `exec()` — the broker is never contacted and no policy check occurs.
+For `git`, the shim makes a routing decision before contacting the broker. Git commands that do not require credential injection are passed directly to the real binary via `exec()` — the broker is never contacted and no policy check occurs. Every `gh` invocation contacts the broker so that `GH_TOKEN` can always be injected.
 
 ### git
 
@@ -186,15 +186,17 @@ The classification is based on the first non-flag argument (global flags such as
 
 ### gh
 
-| Group + action | Routed to |
-|----------------|-----------|
-| `pr create`, `pr comment`, `pr merge`, `pr close`, `pr review` | broker |
-| `issue create`, `issue comment`, `issue close` | broker |
-| `release create` | broker |
-| `api <path>` (GET only; `-X POST/PATCH/DELETE` rejected) | broker |
-| `auth status`, `repo view`, `pr list`, `pr status`, and everything else | real `gh` binary |
+Every `gh` invocation is routed to the broker so that `GH_TOKEN` is always injected from the stored credential. The broker classifies the request:
 
-The classification is based on the first two positional arguments. Any `(group, action)` pair not in the brokered set is passed through.
+| Group + action | Broker path |
+|----------------|-------------|
+| `pr create`, `pr comment`, `pr merge`, `pr close`, `pr review` | policy check → inject → exec |
+| `issue create`, `issue comment`, `issue close` | policy check → inject → exec |
+| `release create` | policy check → inject → exec |
+| `api <path>` (GET only; `-X POST/PATCH/DELETE` rejected) | policy check → inject → exec |
+| `auth status`, `repo view`, `pr list`, `pr status`, and everything else | inject → exec (no policy check) |
+
+The classification is based on the first two positional arguments. Non-policy-gated invocations bypass the resolver and policy engine but still receive `GH_TOKEN`; they are logged with `decision=passthrough`.
 
 ## Operations reference
 
