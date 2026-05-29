@@ -123,6 +123,10 @@ fn start_compose() -> ComposeGuard {
         .current_dir(compose_dir())
         .output();
 
+    for name in &[CONTAINER_NAME, DEVENV_CONTAINER, "ghbrk-it-mock-github"] {
+        let _ = Command::new("docker").args(["rm", "-f", name]).output();
+    }
+
     let up = Command::new("docker")
         .args(["compose", "up", "-d", "--build"])
         .current_dir(compose_dir())
@@ -543,7 +547,7 @@ fn harness_ssh_server_reachable() {
     if skip_if_no_docker("harness_ssh_server_reachable") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
 
     let out = Command::new("ssh-keyscan")
@@ -562,7 +566,7 @@ fn e2e_clone_succeeds() {
     if skip_if_no_docker("e2e_clone_succeeds") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
 
     let user = current_username();
@@ -602,7 +606,7 @@ fn e2e_push_allowed() {
     if skip_if_no_docker("e2e_push_allowed") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
 
     let user = current_username();
@@ -651,7 +655,7 @@ fn e2e_push_denied() {
     if skip_if_no_docker("e2e_push_denied") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
 
     let user = current_username();
@@ -713,7 +717,7 @@ fn harness_teardown_clean() {
     if skip_if_no_docker("harness_teardown_clean") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     {
         let _compose = start_compose();
         // Verify the container is up first so the teardown assertion is
@@ -1036,7 +1040,7 @@ fn devenv_container_reachable_as_root() {
     if skip_if_no_docker("devenv_container_reachable_as_root") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
     wait_for_devenv(Duration::from_secs(60));
 
@@ -1068,7 +1072,7 @@ fn mock_github_reachable_over_tls() {
     if skip_if_no_docker("mock_github_reachable_over_tls") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
     wait_for_devenv(Duration::from_secs(60));
 
@@ -1105,7 +1109,7 @@ fn gh_api_through_broker_succeeds() {
     if skip_if_no_docker("gh_api_through_broker_succeeds") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
     wait_for_devenv(Duration::from_secs(60));
 
@@ -1133,7 +1137,7 @@ fn gh_api_broker_missing_token() {
     if skip_if_no_docker("gh_api_broker_missing_token") {
         return;
     }
-    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
     wait_for_devenv(Duration::from_secs(60));
 
