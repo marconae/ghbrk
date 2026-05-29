@@ -34,6 +34,9 @@ fn gh_is_broker_op(args: &[String]) -> bool {
     let mut positional = args.iter().filter(|a| !a.starts_with('-'));
     let group = positional.next().map(String::as_str).unwrap_or("");
     let action = positional.next().map(String::as_str).unwrap_or("");
+    if group == "api" {
+        return true;
+    }
     matches!(
         (group, action),
         ("pr", "create")
@@ -223,6 +226,12 @@ mod tests {
             Tool::Gh,
             &s(&["release", "create", "v1.0.0"])
         ));
+    }
+
+    #[test]
+    fn gh_api_is_broker_op() {
+        assert!(gh_is_broker_op(&s(&["api", "user"])));
+        assert!(!is_passthrough(Tool::Gh, &s(&["api", "user"])));
     }
 
     #[test]

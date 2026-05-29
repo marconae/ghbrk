@@ -6,8 +6,12 @@ use thiserror::Error;
 const WILDCARD: &str = "*";
 
 /// Operations that ghbrk recognises. Maps to YAML strings via snake_case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// Every operation serialises to a bare snake_case tag — including
+/// `GhApiRead`, which serialises to `gh_api_read` and discards its `path`. A
+/// policy rule names operation *kinds*; the request-side `path` payload is not
+/// part of the policy vocabulary, so matching ignores it (see `same_kind`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Operation {
     Push,
     Fetch,
@@ -22,13 +26,77 @@ pub enum Operation {
     IssueComment,
     IssueClose,
     ReleaseCreate,
+    GhApiRead { path: String },
 }
 
 impl Operation {
     /// True if this operation operates on a specific branch and therefore
     /// should be matched against the rule's branch patterns.
-    pub fn has_branch(self) -> bool {
+    pub fn has_branch(&self) -> bool {
         matches!(self, Operation::Push)
+    }
+
+    /// The bare snake_case tag for this operation, ignoring any payload.
+    fn tag(&self) -> &'static str {
+        match self {
+            Operation::Push => "push",
+            Operation::Fetch => "fetch",
+            Operation::Pull => "pull",
+            Operation::Clone => "clone",
+            Operation::PrOpen => "pr_open",
+            Operation::PrComment => "pr_comment",
+            Operation::PrClose => "pr_close",
+            Operation::PrMerge => "pr_merge",
+            Operation::PrReview => "pr_review",
+            Operation::IssueOpen => "issue_open",
+            Operation::IssueComment => "issue_comment",
+            Operation::IssueClose => "issue_close",
+            Operation::ReleaseCreate => "release_create",
+            Operation::GhApiRead { .. } => "gh_api_read",
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<Operation> {
+        let op = match tag {
+            "push" => Operation::Push,
+            "fetch" => Operation::Fetch,
+            "pull" => Operation::Pull,
+            "clone" => Operation::Clone,
+            "pr_open" => Operation::PrOpen,
+            "pr_comment" => Operation::PrComment,
+            "pr_close" => Operation::PrClose,
+            "pr_merge" => Operation::PrMerge,
+            "pr_review" => Operation::PrReview,
+            "issue_open" => Operation::IssueOpen,
+            "issue_comment" => Operation::IssueComment,
+            "issue_close" => Operation::IssueClose,
+            "release_create" => Operation::ReleaseCreate,
+            "gh_api_read" => Operation::GhApiRead {
+                path: String::new(),
+            },
+            _ => return None,
+        };
+        Some(op)
+    }
+
+    /// True when two operations name the same kind, ignoring any payload such
+    /// as `GhApiRead`'s `path`. Policy rules match on kind, not payload.
+    fn same_kind(&self, other: &Operation) -> bool {
+        self.tag() == other.tag()
+    }
+}
+
+impl Serialize for Operation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.tag())
+    }
+}
+
+impl<'de> Deserialize<'de> for Operation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let tag = String::deserialize(deserializer)?;
+        Operation::from_tag(&tag)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&tag, &["push", "..."]))
     }
 }
 
@@ -163,7 +231,11 @@ fn rule_matches(rule: &Rule, request: &Request<'_>) -> bool {
     if !field_matches(&rule.repo, request.repo) {
         return false;
     }
-    if !rule.operations.contains(&request.operation) {
+    if !rule
+        .operations
+        .iter()
+        .any(|op| op.same_kind(&request.operation))
+    {
         return false;
     }
     if !branch_matches(&rule.branches, request) {
@@ -449,6 +521,97 @@ rules:
     #[test]
     fn pull_has_branch_is_false() {
         assert!(!Operation::Pull.has_branch());
+    }
+
+    #[test]
+    fn gh_api_read_has_branch_is_false() {
+        assert!(!Operation::GhApiRead {
+            path: "user".to_string()
+        }
+        .has_branch());
+    }
+
+    #[test]
+    fn policy_loads_gh_api_read() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: "*"
+    repo: "*"
+    operations: [gh_api_read]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(policy.rules[0].operations.len(), 1);
+    }
+
+    #[test]
+    fn gh_api_read_allowed_user_scope() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: "*"
+    repo: "*"
+    operations: [gh_api_read]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        let op = Operation::GhApiRead {
+            path: "user".to_string(),
+        };
+        assert_eq!(
+            policy.evaluate(&req("alice", "*", "*", op, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn gh_api_read_ignores_branch() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: "*"
+    repo: "*"
+    operations: [gh_api_read]
+    branches: [main]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        let op = Operation::GhApiRead {
+            path: "repos/acme/web".to_string(),
+        };
+        assert_eq!(
+            policy.evaluate(&req("alice", "*", "*", op, Some("anything"))),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn gh_api_read_default_deny() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [push]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        let op = Operation::GhApiRead {
+            path: "user".to_string(),
+        };
+        assert!(matches!(
+            policy.evaluate(&req("alice", "*", "*", op, None)),
+            Decision::Deny { .. }
+        ));
     }
 
     #[test]

@@ -6,3 +6,25 @@ services:
     container_name: ghbrk-it-git-server
     ports:
       - "2222:22"
+
+  mock-github:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-github
+    container_name: ghbrk-it-mock-github
+    volumes:
+      - ./certs/mock-github.crt:/certs/mock-github.crt:ro
+      - ./certs/mock-github.key:/certs/mock-github.key:ro
+    # Port 443 is NOT published to the host -- internal Docker network only.
+    networks:
+      - default
+
+  devenv:
+    build:
+      context: .
+      dockerfile: Dockerfile.devenv
+    container_name: ghbrk-it-devenv
+    depends_on:
+      - mock-github
+    networks:
+      - default

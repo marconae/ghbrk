@@ -287,16 +287,15 @@ async fn process_request(
         }
     };
 
+    let op_name = operation_name(&resolved.operation);
     let policy_req = PolicyRequest {
         user: username,
         org: &resolved.org,
         repo: &resolved.repo,
-        operation: resolved.operation,
+        operation: resolved.operation.clone(),
         branch: resolved.branch.as_deref(),
     };
     let decision = policy.evaluate(&policy_req);
-
-    let op_name = operation_name(resolved.operation);
     match &decision {
         Decision::Deny { reason } => {
             write_audit(
@@ -414,7 +413,7 @@ fn build_env(
     }
 }
 
-fn operation_name(op: Operation) -> &'static str {
+fn operation_name(op: &Operation) -> &'static str {
     match op {
         Operation::Push => "push",
         Operation::Fetch => "fetch",
@@ -429,6 +428,7 @@ fn operation_name(op: Operation) -> &'static str {
         Operation::IssueComment => "issue_comment",
         Operation::IssueClose => "issue_close",
         Operation::ReleaseCreate => "release_create",
+        Operation::GhApiRead { .. } => "gh_api_read",
     }
 }
 
@@ -524,8 +524,11 @@ mod tests {
             Operation::IssueComment,
             Operation::IssueClose,
             Operation::ReleaseCreate,
+            Operation::GhApiRead {
+                path: "user".to_string(),
+            },
         ] {
-            assert!(!operation_name(op).is_empty(), "missing name for {op:?}");
+            assert!(!operation_name(&op).is_empty(), "missing name for {op:?}");
         }
     }
 }

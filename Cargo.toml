@@ -1,6 +1,6 @@
 [package]
 name = "ghbrk"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 
@@ -25,9 +25,15 @@ thiserror = "2"
 glob = "0.3"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tempfile = "3"
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "check"
+path = "tests/check.rs"
 
 [[test]]
 name = "harness"

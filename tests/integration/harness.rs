@@ -47,8 +47,21 @@ use tempfile::TempDir;
 
 const HOST_PORT: u16 = 2222;
 const CONTAINER_NAME: &str = "ghbrk-it-git-server";
+const DEVENV_CONTAINER: &str = "ghbrk-it-devenv";
 const REMOTE_ORG: &str = "test-org";
 const HARNESS_GIT_URL: &str = "ssh://git@github.com/test-org/test.git";
+
+/// Synthetic token planted in the credentials store for the broker `gh api`
+/// tests. The mock GitHub API accepts any non-empty bearer token.
+const FAKE_TOKEN: &str = "test-fake-token-value";
+
+/// Hostname the mock GitHub service is reachable at on the Docker network.
+const MOCK_GH_HOST: &str = "mock-github";
+
+/// Path of the static `ghbrk` binary copied into the `devenv` container, and
+/// the per-test daemon socket inside that container.
+const CONTAINER_BIN: &str = "/usr/local/bin/ghbrk";
+const CONTAINER_SOCKET: &str = "/tmp/ghbrk-test.sock";
 
 /// Serializes test-level access to the shared Docker Compose project.
 static GLOBAL_LOCK: Mutex<()> = Mutex::new(());
@@ -790,4 +803,357 @@ fn seed_initial_commit(ssh: &SshHarness) {
         );
     }
     let _ = ssh; // keep harness alive for clarity; key file used above.
+}
+
+// ---------------------------------------------------------------------------
+// gh api → broker harness (mock GitHub over TLS)
+//
+// Unlike the SSH git tests, these run the *entire* broker pipeline inside the
+// `devenv` container: the `mock-github` service is only reachable on the Docker
+// network, and its TLS certificate is only trusted inside `devenv` (the CA is
+// installed into that image's trust store at build time). The daemon and the
+// `gh` child it spawns must therefore both execute inside `devenv`.
+//
+// The daemon and shim are the host-built `ghbrk` binary, statically linked
+// against musl so it runs unchanged on the container's (older) glibc. The test
+// builds that target, copies the binary into `devenv`, plants synthetic
+// credentials with mode 0600, copies in an allow-all `gh_api_read` policy,
+// starts the daemon inside the container with `GH_HOST=mock-github`, and runs
+// `ghbrk gh api user` through it.
+// ---------------------------------------------------------------------------
+
+/// Waits until the `devenv` container responds to `docker exec ... true`.
+fn wait_for_devenv(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let out = Command::new("docker")
+            .args(["exec", DEVENV_CONTAINER, "true"])
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    panic!("devenv container not reachable within {timeout:?}");
+}
+
+/// Builds the static musl `ghbrk` binary and returns its path. The container's
+/// glibc is older than the test host's, so the dynamically linked
+/// `CARGO_BIN_EXE_ghbrk` would fail to load inside `devenv`; a static musl
+/// build runs unchanged. The build is incremental, so repeat runs are cheap.
+fn build_static_binary() -> PathBuf {
+    const TARGET: &str = "x86_64-unknown-linux-musl";
+    let out = Command::new("cargo")
+        .args(["build", "--release", "--target", TARGET])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("invoke cargo build for musl target");
+    assert!(
+        out.status.success(),
+        "failed to build static musl binary: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(TARGET)
+        .join("release")
+        .join("ghbrk");
+    assert!(bin.is_file(), "static binary missing at {}", bin.display());
+    bin
+}
+
+/// Runs `docker exec <container> <args...>` and returns the captured output.
+fn docker_exec(container: &str, args: &[&str]) -> std::process::Output {
+    Command::new("docker")
+        .arg("exec")
+        .arg(container)
+        .args(args)
+        .output()
+        .expect("docker exec")
+}
+
+/// Writes `contents` to `path` inside `container` with the given octal mode,
+/// without exposing the bytes on the command line (uses `tee` over stdin).
+fn write_file_in_container(container: &str, path: &str, contents: &str, mode: &str) {
+    use std::process::Stdio;
+    let mut child = Command::new("docker")
+        .args(["exec", "-i", container, "tee", path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("docker exec tee");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(contents.as_bytes())
+        .expect("write file contents to container");
+    let status = child.wait().expect("wait tee");
+    assert!(status.success(), "tee {path} failed: {status:?}");
+
+    let chmod = docker_exec(container, &["chmod", mode, path]);
+    assert!(
+        chmod.status.success(),
+        "chmod {mode} {path} failed: {}",
+        String::from_utf8_lossy(&chmod.stderr)
+    );
+}
+
+/// Allow-all `gh_api_read` policy: matches any user/org/repo. Mirrors the
+/// wildcard user-scoped rule the broker resolves `gh api` requests against.
+fn gh_api_allow_policy() -> &'static str {
+    "rules:\n  \
+     - user: \"*\"\n    \
+       org: \"*\"\n    \
+       repo: \"*\"\n    \
+       operations: [gh_api_read]\n    \
+       effect: allow\n"
+}
+
+/// Provisions the `devenv` container for a broker `gh api` run: copies the
+/// static binary in, plants the policy, and creates the credential tree for
+/// `root` (the container's only user). When `with_token` is false the `token`
+/// file is omitted so the broker's credential load fails.
+fn provision_devenv(with_token: bool) {
+    let bin = build_static_binary();
+    let cp = Command::new("docker")
+        .args([
+            "cp",
+            &bin.to_string_lossy(),
+            &format!("{DEVENV_CONTAINER}:{CONTAINER_BIN}"),
+        ])
+        .output()
+        .expect("docker cp ghbrk binary");
+    assert!(
+        cp.status.success(),
+        "docker cp binary failed: {}",
+        String::from_utf8_lossy(&cp.stderr)
+    );
+    let chmod = docker_exec(DEVENV_CONTAINER, &["chmod", "755", CONTAINER_BIN]);
+    assert!(chmod.status.success(), "chmod binary failed");
+
+    // The daemon resolves credentials for the connecting peer's username. The
+    // shim runs as root inside devenv, so the creds dir must be keyed "root".
+    let creds_user_dir = "/tmp/ghbrk-creds/root";
+    let mk = docker_exec(DEVENV_CONTAINER, &["mkdir", "-p", creds_user_dir]);
+    assert!(mk.status.success(), "mkdir creds dir failed");
+
+    // The broker requires the SSH key file to exist with mode 0600 even for a
+    // `gh api` call (credential loading is uniform across tools).
+    write_file_in_container(
+        DEVENV_CONTAINER,
+        &format!("{creds_user_dir}/id_rsa"),
+        "placeholder-key\n",
+        "600",
+    );
+    if with_token {
+        write_file_in_container(
+            DEVENV_CONTAINER,
+            &format!("{creds_user_dir}/token"),
+            FAKE_TOKEN,
+            "600",
+        );
+    }
+
+    write_file_in_container(
+        DEVENV_CONTAINER,
+        "/tmp/ghbrk-policy.yaml",
+        gh_api_allow_policy(),
+        "644",
+    );
+}
+
+/// Starts the daemon inside `devenv` (detached) with `GH_HOST=mock-github` and
+/// waits for its socket to appear. Returns once the socket is a live socket
+/// file or panics on timeout.
+fn start_daemon_in_devenv() {
+    // Clear any stale socket from a previous run within the same container.
+    let _ = docker_exec(DEVENV_CONTAINER, &["rm", "-f", CONTAINER_SOCKET]);
+
+    let detached = Command::new("docker")
+        .args([
+            "exec",
+            "-d",
+            DEVENV_CONTAINER,
+            "env",
+            &format!("GHBRK_SOCKET={CONTAINER_SOCKET}"),
+            "GHBRK_POLICY=/tmp/ghbrk-policy.yaml",
+            "GHBRK_CREDENTIALS_ROOT=/tmp/ghbrk-creds",
+            "GHBRK_AUDIT_LOG=/tmp/ghbrk-audit.log",
+            &format!("GH_HOST={MOCK_GH_HOST}"),
+            CONTAINER_BIN,
+            "daemon",
+        ])
+        .output()
+        .expect("docker exec -d daemon");
+    assert!(
+        detached.status.success(),
+        "failed to start daemon in devenv: {}",
+        String::from_utf8_lossy(&detached.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let test = docker_exec(DEVENV_CONTAINER, &["test", "-S", CONTAINER_SOCKET]);
+        if test.status.success() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    panic!("daemon socket {CONTAINER_SOCKET} did not appear in devenv within 10s");
+}
+
+/// Best-effort kill of the in-container daemon between tests.
+fn stop_daemon_in_devenv() {
+    let _ = docker_exec(DEVENV_CONTAINER, &["pkill", "-f", "ghbrk daemon"]);
+    let _ = docker_exec(DEVENV_CONTAINER, &["rm", "-f", CONTAINER_SOCKET]);
+}
+
+/// Runs `ghbrk gh api user` through the in-container daemon and returns the
+/// captured output.
+fn run_gh_api_user_in_devenv() -> std::process::Output {
+    Command::new("docker")
+        .args([
+            "exec",
+            DEVENV_CONTAINER,
+            "env",
+            &format!("GHBRK_SOCKET={CONTAINER_SOCKET}"),
+            CONTAINER_BIN,
+            "gh",
+            "api",
+            "user",
+        ])
+        .output()
+        .expect("docker exec gh api user")
+}
+
+#[test]
+fn devenv_container_reachable_as_root() {
+    if skip_if_no_docker("devenv_container_reachable_as_root") {
+        return;
+    }
+    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _compose = start_compose();
+    wait_for_devenv(Duration::from_secs(60));
+
+    let id = docker_exec(DEVENV_CONTAINER, &["id"]);
+    assert!(id.status.success(), "id failed in devenv");
+    let id_out = String::from_utf8_lossy(&id.stdout);
+    assert!(
+        id_out.contains("uid=0(root)"),
+        "devenv must run as root: {id_out}"
+    );
+
+    let gh = docker_exec(DEVENV_CONTAINER, &["gh", "--version"]);
+    assert!(
+        gh.status.success(),
+        "gh --version failed in devenv: {}",
+        String::from_utf8_lossy(&gh.stderr)
+    );
+
+    let git = docker_exec(DEVENV_CONTAINER, &["git", "--version"]);
+    assert!(
+        git.status.success(),
+        "git --version failed in devenv: {}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+}
+
+#[test]
+fn mock_github_reachable_over_tls() {
+    if skip_if_no_docker("mock_github_reachable_over_tls") {
+        return;
+    }
+    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _compose = start_compose();
+    wait_for_devenv(Duration::from_secs(60));
+
+    // Curl over TLS *without* -k: success proves the test CA is trusted and the
+    // server certificate's SAN matches `mock-github`.
+    let out = docker_exec(
+        DEVENV_CONTAINER,
+        &[
+            "curl",
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "https://mock-github/api/v3/user",
+            "-H",
+            &format!("Authorization: bearer {FAKE_TOKEN}"),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "curl to mock-github failed (TLS trust?): stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = String::from_utf8_lossy(&out.stdout);
+    let code = body.lines().last().unwrap_or("");
+    assert_eq!(code, "200", "expected HTTP 200, got body:\n{body}");
+    assert!(
+        body.contains("\"login\""),
+        "mock response missing login field: {body}"
+    );
+}
+
+#[test]
+fn gh_api_through_broker_succeeds() {
+    if skip_if_no_docker("gh_api_through_broker_succeeds") {
+        return;
+    }
+    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _compose = start_compose();
+    wait_for_devenv(Duration::from_secs(60));
+
+    provision_devenv(true);
+    start_daemon_in_devenv();
+    let out = run_gh_api_user_in_devenv();
+    stop_daemon_in_devenv();
+
+    assert!(
+        out.status.success(),
+        "gh api user through broker failed: code={:?} stdout={} stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"login\""),
+        "broker gh api response missing login: stdout={stdout}"
+    );
+}
+
+#[test]
+fn gh_api_broker_missing_token() {
+    if skip_if_no_docker("gh_api_broker_missing_token") {
+        return;
+    }
+    let _lock = GLOBAL_LOCK.lock().unwrap();
+    let _compose = start_compose();
+    wait_for_devenv(Duration::from_secs(60));
+
+    provision_devenv(false);
+    start_daemon_in_devenv();
+    let out = run_gh_api_user_in_devenv();
+    stop_daemon_in_devenv();
+
+    assert!(
+        !out.status.success(),
+        "gh api user must fail without a token: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("credential") || combined.contains("token") || combined.contains("ghbrk"),
+        "expected a meaningful credential error: {combined}"
+    );
 }

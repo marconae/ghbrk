@@ -15,6 +15,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Check credentials and GitHub API reachability
+    Check,
     /// Run the broker daemon
     Daemon,
     /// Invoke git through the broker (shim mode)
@@ -55,6 +57,7 @@ fn main() -> ExitCode {
         _ => {
             let cli = Cli::parse();
             match cli.command {
+                Commands::Check => cmd::check::run(),
                 Commands::Daemon => cmd::daemon::run(),
                 Commands::Git { args } => cmd::git::run(&args),
                 Commands::Gh { args } => cmd::gh::run(&args),

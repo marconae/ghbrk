@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::policy::Operation;
 
 const GITHUB_HOST: &str = "github.com";
+const WILDCARD: &str = "*";
 
 /// Outcome of resolving a shim invocation into a policy-engine input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,8 @@ pub enum ResolverError {
     UnknownGitSubcommand(String),
     #[error("gh subcommand '{0}' is not supported")]
     UnknownGhSubcommand(String),
+    #[error("gh command is not permitted: {0}")]
+    UnknownGhCommand(String),
     #[error("missing required argument for gh '{0}'")]
     MissingGhArgument(String),
     #[error("io error: {0}")]
@@ -329,7 +332,16 @@ fn git_global_flag_takes_value(flag: &str) -> bool {
 
 /// Resolve a `gh` invocation.
 pub fn resolve_gh(args: &[String], cwd: &Path) -> Result<ResolvedRequest, ResolverError> {
-    let (operation, after) = classify_gh(args)?;
+    let operation = classify_gh(args)?;
+    if let Operation::GhApiRead { .. } = operation {
+        return Ok(ResolvedRequest {
+            org: WILDCARD.to_string(),
+            repo: WILDCARD.to_string(),
+            branch: None,
+            operation,
+            url_scheme: UrlScheme::Https,
+        });
+    }
     let explicit_repo = extract_repo_flag(args);
     let (org, repo, scheme) = match explicit_repo {
         Some(spec) => {
@@ -349,7 +361,6 @@ pub fn resolve_gh(args: &[String], cwd: &Path) -> Result<ResolvedRequest, Resolv
     } else {
         None
     };
-    let _ = after;
     Ok(ResolvedRequest {
         org,
         repo,
@@ -359,21 +370,10 @@ pub fn resolve_gh(args: &[String], cwd: &Path) -> Result<ResolvedRequest, Resolv
     })
 }
 
-fn classify_gh(args: &[String]) -> Result<(Operation, usize), ResolverError> {
-    let positional: Vec<(usize, &String)> = args
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| !a.starts_with('-'))
-        .collect();
-    let group = positional
-        .first()
-        .map(|(_, s)| s.as_str())
-        .unwrap_or_default();
-    let action = positional
-        .get(1)
-        .map(|(_, s)| s.as_str())
-        .unwrap_or_default();
-    let consumed_idx = positional.get(1).map(|(i, _)| *i).unwrap_or(0);
+fn classify_gh(args: &[String]) -> Result<Operation, ResolverError> {
+    let positional = gh_positional_args(args);
+    let group = positional.first().map(|s| s.as_str()).unwrap_or_default();
+    let action = positional.get(1).map(|s| s.as_str()).unwrap_or_default();
     let op = match (group, action) {
         ("pr", "create") => Operation::PrOpen,
         ("pr", "comment") => Operation::PrComment,
@@ -384,11 +384,65 @@ fn classify_gh(args: &[String]) -> Result<(Operation, usize), ResolverError> {
         ("issue", "comment") => Operation::IssueComment,
         ("issue", "close") => Operation::IssueClose,
         ("release", "create") => Operation::ReleaseCreate,
+        ("api", "") => return Err(ResolverError::MissingGhArgument("api".to_string())),
+        ("api", path) => {
+            if let Some(method) = gh_api_method(args) {
+                if !method.eq_ignore_ascii_case("GET") {
+                    return Err(ResolverError::UnknownGhCommand(format!(
+                        "gh api -X {method}"
+                    )));
+                }
+            }
+            Operation::GhApiRead {
+                path: path.to_string(),
+            }
+        }
         ("", _) => return Err(ResolverError::UnknownGhSubcommand(String::new())),
         (g, "") => return Err(ResolverError::MissingGhArgument(g.to_string())),
         (g, a) => return Err(ResolverError::UnknownGhSubcommand(format!("{g} {a}"))),
     };
-    Ok((op, consumed_idx))
+    Ok(op)
+}
+
+/// Collects the positional (non-flag) arguments of a `gh` invocation,
+/// skipping the value that follows a value-taking flag such as `-X`/
+/// `--method` so it is not mistaken for the API path.
+fn gh_positional_args(args: &[String]) -> Vec<&String> {
+    let mut out = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-X" || arg == "--method" {
+            iter.next();
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        out.push(arg);
+    }
+    out
+}
+
+/// Extracts the HTTP method requested for a `gh api` call, if any `-X`/
+/// `--method` flag is present. Recognizes spaced (`-X POST`), compact
+/// (`-XPOST`), and `=`-joined (`--method=POST`) forms. Returns `None` when no
+/// method flag is present (gh defaults to GET).
+fn gh_api_method(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-X" || arg == "--method" {
+            return iter.next().cloned();
+        }
+        if let Some(rest) = arg.strip_prefix("--method=") {
+            return Some(rest.to_string());
+        }
+        if let Some(rest) = arg.strip_prefix("-X") {
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn extract_repo_flag(args: &[String]) -> Option<String> {
@@ -548,19 +602,19 @@ mod argv_tests {
 
     #[test]
     fn classify_gh_pr_create() {
-        let (op, _) = classify_gh(&s(&["pr", "create", "--title", "x"])).unwrap();
+        let op = classify_gh(&s(&["pr", "create", "--title", "x"])).unwrap();
         assert_eq!(op, Operation::PrOpen);
     }
 
     #[test]
     fn classify_gh_issue_close() {
-        let (op, _) = classify_gh(&s(&["issue", "close", "42"])).unwrap();
+        let op = classify_gh(&s(&["issue", "close", "42"])).unwrap();
         assert_eq!(op, Operation::IssueClose);
     }
 
     #[test]
     fn classify_gh_release_create() {
-        let (op, _) = classify_gh(&s(&["release", "create", "v1"])).unwrap();
+        let op = classify_gh(&s(&["release", "create", "v1"])).unwrap();
         assert_eq!(op, Operation::ReleaseCreate);
     }
 
@@ -571,20 +625,71 @@ mod argv_tests {
     }
 
     #[test]
+    fn classify_gh_api_user() {
+        let op = classify_gh(&s(&["api", "user"])).unwrap();
+        assert_eq!(
+            op,
+            Operation::GhApiRead {
+                path: "user".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_gh_api_post_rejected() {
+        let err = classify_gh(&s(&["api", "-X", "POST", "repos/x"])).unwrap_err();
+        assert!(matches!(err, ResolverError::UnknownGhCommand(_)));
+    }
+
+    #[test]
+    fn classify_gh_api_delete_rejected() {
+        let err = classify_gh(&s(&["api", "--method", "DELETE", "repos/x"])).unwrap_err();
+        assert!(matches!(err, ResolverError::UnknownGhCommand(_)));
+    }
+
+    #[test]
+    fn classify_gh_api_explicit_get_allowed() {
+        let op = classify_gh(&s(&["api", "-X", "GET", "user"])).unwrap();
+        assert_eq!(
+            op,
+            Operation::GhApiRead {
+                path: "user".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_gh_api_nested_path() {
+        let op = classify_gh(&s(&["api", "repos/acme/web", "--jq", ".id"])).unwrap();
+        assert_eq!(
+            op,
+            Operation::GhApiRead {
+                path: "repos/acme/web".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_gh_api_missing_path() {
+        let err = classify_gh(&s(&["api"])).unwrap_err();
+        assert!(matches!(err, ResolverError::MissingGhArgument(_)));
+    }
+
+    #[test]
     fn classify_gh_pr_comment() {
-        let (op, _) = classify_gh(&s(&["pr", "comment", "42", "--body", "hi"])).unwrap();
+        let op = classify_gh(&s(&["pr", "comment", "42", "--body", "hi"])).unwrap();
         assert_eq!(op, Operation::PrComment);
     }
 
     #[test]
     fn classify_gh_pr_review() {
-        let (op, _) = classify_gh(&s(&["pr", "review", "42", "--approve"])).unwrap();
+        let op = classify_gh(&s(&["pr", "review", "42", "--approve"])).unwrap();
         assert_eq!(op, Operation::PrReview);
     }
 
     #[test]
     fn classify_gh_issue_comment() {
-        let (op, _) = classify_gh(&s(&["issue", "comment", "42", "--body", "hi"])).unwrap();
+        let op = classify_gh(&s(&["issue", "comment", "42", "--body", "hi"])).unwrap();
         assert_eq!(op, Operation::IssueComment);
     }
 

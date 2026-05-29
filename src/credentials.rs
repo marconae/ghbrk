@@ -197,8 +197,24 @@ pub fn https_git_env(creds: &Credentials) -> Result<HttpsGitEnv, CredentialError
 }
 
 /// Builds env vars for a `gh` invocation.
+///
+/// `GH_TOKEN` is always supplied from the user's credentials. The executor
+/// clears the parent environment before spawning `gh`, so a `GH_HOST` set on
+/// the daemon (e.g. to target a GitHub Enterprise host or an integration mock)
+/// would otherwise be dropped. It is forwarded here when present.
 pub fn gh_env(creds: &Credentials) -> Vec<(String, String)> {
-    vec![("GH_TOKEN".to_string(), creds.token.clone())]
+    let mut env = vec![("GH_TOKEN".to_string(), creds.token.clone())];
+    if let Ok(host) = std::env::var("GH_HOST") {
+        if !host.is_empty() {
+            // For a non-github.com host, `gh` reads the token from
+            // GH_ENTERPRISE_TOKEN and ignores GH_TOKEN, so supply both.
+            if host != "github.com" {
+                env.push(("GH_ENTERPRISE_TOKEN".to_string(), creds.token.clone()));
+            }
+            env.push(("GH_HOST".to_string(), host));
+        }
+    }
+    env
 }
 
 #[cfg(test)]
@@ -320,8 +336,13 @@ mod tests {
         );
     }
 
+    /// Serializes tests that mutate the process-global `GH_HOST` env var.
+    static GH_HOST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn gh_env_sets_gh_token() {
+        let _guard = GH_HOST_LOCK.lock().unwrap();
+        std::env::remove_var("GH_HOST");
         let creds = Credentials {
             ssh_key_path: PathBuf::from("/x"),
             token: "ghp_secret".into(),
@@ -331,6 +352,65 @@ mod tests {
             env,
             vec![("GH_TOKEN".to_string(), "ghp_secret".to_string())]
         );
+    }
+
+    #[test]
+    fn gh_env_forwards_gh_host_when_set() {
+        let _guard = GH_HOST_LOCK.lock().unwrap();
+        std::env::set_var("GH_HOST", "mock-github");
+        let creds = Credentials {
+            ssh_key_path: PathBuf::from("/x"),
+            token: "ghp_secret".into(),
+        };
+        let env = gh_env(&creds);
+        std::env::remove_var("GH_HOST");
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        assert_eq!(map.get("GH_TOKEN").map(String::as_str), Some("ghp_secret"));
+        assert_eq!(map.get("GH_HOST").map(String::as_str), Some("mock-github"));
+    }
+
+    #[test]
+    fn gh_env_sets_enterprise_token_for_non_github_host() {
+        // `gh` ignores GH_TOKEN when GH_HOST points at a non-github.com host
+        // and reads GH_ENTERPRISE_TOKEN instead. The broker must supply both.
+        let _guard = GH_HOST_LOCK.lock().unwrap();
+        std::env::set_var("GH_HOST", "mock-github");
+        let creds = Credentials {
+            ssh_key_path: PathBuf::from("/x"),
+            token: "ghp_secret".into(),
+        };
+        let env = gh_env(&creds);
+        std::env::remove_var("GH_HOST");
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            map.get("GH_ENTERPRISE_TOKEN").map(String::as_str),
+            Some("ghp_secret")
+        );
+    }
+
+    #[test]
+    fn gh_env_omits_enterprise_token_for_github_com() {
+        let _guard = GH_HOST_LOCK.lock().unwrap();
+        std::env::set_var("GH_HOST", "github.com");
+        let creds = Credentials {
+            ssh_key_path: PathBuf::from("/x"),
+            token: "ghp_secret".into(),
+        };
+        let env = gh_env(&creds);
+        std::env::remove_var("GH_HOST");
+        assert!(env.iter().all(|(k, _)| k != "GH_ENTERPRISE_TOKEN"));
+    }
+
+    #[test]
+    fn gh_env_omits_gh_host_when_unset() {
+        let _guard = GH_HOST_LOCK.lock().unwrap();
+        std::env::remove_var("GH_HOST");
+        let creds = Credentials {
+            ssh_key_path: PathBuf::from("/x"),
+            token: "ghp_secret".into(),
+        };
+        let env = gh_env(&creds);
+        assert!(env.iter().all(|(k, _)| k != "GH_HOST"));
     }
 
     #[test]
