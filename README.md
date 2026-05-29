@@ -58,11 +58,12 @@ The install script (idempotent; safe to re-run):
 6. Installs the systemd unit and `tmpfiles.d` snippet; enables and starts the service
 7. Adds `$SUDO_USER` to `ghbrk-clients` (effective at next login)
 
-Check the service:
+Check the service and verify credentials:
 
 ```bash
 systemctl status ghbrk
 journalctl -u ghbrk -f
+ghbrk check          # verify SSH key, token, and GitHub API reachability
 ```
 
 ## Configuration
@@ -190,6 +191,7 @@ The classification is based on the first non-flag argument (global flags such as
 | `pr create`, `pr comment`, `pr merge`, `pr close`, `pr review` | broker |
 | `issue create`, `issue comment`, `issue close` | broker |
 | `release create` | broker |
+| `api <path>` (GET only; `-X POST/PATCH/DELETE` rejected) | broker |
 | `auth status`, `repo view`, `pr list`, `pr status`, and everything else | real `gh` binary |
 
 The classification is based on the first two positional arguments. Any `(group, action)` pair not in the brokered set is passed through.
@@ -213,6 +215,7 @@ The classification is based on the first two positional arguments. Any `(group, 
 | `issue_comment` | `gh issue comment` | no |
 | `issue_close` | `gh issue close` | no |
 | `release_create` | `gh release create` | no |
+| `gh_api_read` | `gh api <path>` (GET) | no |
 
 Only `push` evaluates the `branches` field. For all other operations the branch field in a rule is ignored.
 
