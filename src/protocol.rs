@@ -23,6 +23,12 @@ pub struct Request {
     pub tool: Tool,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// Raw remote URL hint resolved by the shim (e.g. `git@github.com:org/repo.git`).
+    #[serde(default)]
+    pub remote_url: Option<String>,
+    /// Head branch name hint resolved by the shim (e.g. `main`).
+    #[serde(default)]
+    pub head_branch: Option<String>,
 }
 
 /// Frames the broker emits back to the shim.
@@ -125,6 +131,8 @@ mod tests {
             tool: Tool::Check,
             args: vec![],
             cwd: PathBuf::from("/"),
+            remote_url: None,
+            head_branch: None,
         };
         let decoded: Request = round_trip(&req).await;
         assert_eq!(decoded, req);
@@ -138,9 +146,37 @@ mod tests {
             tool: Tool::Git,
             args: vec!["push".into(), "origin".into(), "main".into()],
             cwd: PathBuf::from("/work/repo"),
+            remote_url: None,
+            head_branch: None,
         };
         let decoded: Request = round_trip(&original).await;
         assert_eq!(decoded, original);
+    }
+
+    #[tokio::test]
+    async fn request_round_trip_with_hints() {
+        let original = Request {
+            tool: Tool::Git,
+            args: vec!["push".into(), "origin".into(), "main".into()],
+            cwd: PathBuf::from("/work/repo"),
+            remote_url: Some("git@github.com:acme/web.git".into()),
+            head_branch: Some("main".into()),
+        };
+        let decoded: Request = round_trip(&original).await;
+        assert_eq!(decoded, original);
+        assert_eq!(
+            decoded.remote_url.as_deref(),
+            Some("git@github.com:acme/web.git")
+        );
+        assert_eq!(decoded.head_branch.as_deref(), Some("main"));
+    }
+
+    #[tokio::test]
+    async fn request_without_hint_fields_defaults_to_none() {
+        let legacy_json = r#"{"tool":"git","args":["status"],"cwd":"/work/repo"}"#;
+        let decoded: Request = serde_json::from_str(legacy_json).expect("legacy decode");
+        assert_eq!(decoded.remote_url, None);
+        assert_eq!(decoded.head_branch, None);
     }
 
     #[tokio::test]

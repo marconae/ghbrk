@@ -454,8 +454,18 @@ async fn handle_check_request(
 
 fn resolve_request(request: &Request) -> Result<ResolvedRequest, ResolverError> {
     match request.tool {
-        Tool::Git => resolve_git(&request.args, &request.cwd),
-        Tool::Gh => resolve_gh(&request.args, &request.cwd),
+        Tool::Git => resolve_git(
+            &request.args,
+            &request.cwd,
+            request.remote_url.as_deref(),
+            request.head_branch.as_deref(),
+        ),
+        Tool::Gh => resolve_gh(
+            &request.args,
+            &request.cwd,
+            request.remote_url.as_deref(),
+            request.head_branch.as_deref(),
+        ),
         Tool::Check => unreachable!("Tool::Check is handled before resolve_request"),
     }
 }

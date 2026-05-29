@@ -27,8 +27,13 @@ fn args(items: &[&str]) -> Vec<String> {
 #[test]
 fn resolve_git_push() {
     let dir = make_repo("git@github.com:acme/web.git", "feature/x");
-    let resolved =
-        resolve_git(&args(&["push", "origin", "feature/x"]), dir.path()).expect("resolve");
+    let resolved = resolve_git(
+        &args(&["push", "origin", "feature/x"]),
+        dir.path(),
+        None,
+        None,
+    )
+    .expect("resolve");
     assert_eq!(
         resolved,
         ResolvedRequest {
@@ -44,7 +49,7 @@ fn resolve_git_push() {
 #[test]
 fn resolve_git_push_uses_head_when_no_refspec() {
     let dir = make_repo("git@github.com:acme/web.git", "feature/x");
-    let resolved = resolve_git(&args(&["push"]), dir.path()).expect("resolve");
+    let resolved = resolve_git(&args(&["push"]), dir.path(), None, None).expect("resolve");
     assert_eq!(resolved.branch.as_deref(), Some("feature/x"));
 }
 
@@ -54,6 +59,8 @@ fn resolve_git_clone_explicit_url() {
     let resolved = resolve_git(
         &args(&["clone", "https://github.com/acme/web.git", "/tmp/work"]),
         elsewhere.path(),
+        None,
+        None,
     )
     .expect("resolve");
     assert_eq!(resolved.org, "acme");
@@ -66,7 +73,8 @@ fn resolve_git_clone_explicit_url() {
 #[test]
 fn resolve_git_fetch() {
     let dir = make_repo("https://github.com/acme/web.git", "main");
-    let resolved = resolve_git(&args(&["fetch", "origin"]), dir.path()).expect("resolve");
+    let resolved =
+        resolve_git(&args(&["fetch", "origin"]), dir.path(), None, None).expect("resolve");
     assert_eq!(resolved.operation, Operation::Fetch);
     assert_eq!(resolved.org, "acme");
     assert_eq!(resolved.repo, "web");
@@ -76,8 +84,13 @@ fn resolve_git_fetch() {
 #[test]
 fn resolve_gh_pr_create_cwd() {
     let dir = make_repo("git@github.com:acme/web.git", "feature/x");
-    let resolved =
-        resolve_gh(&args(&["pr", "create", "--title", "foo"]), dir.path()).expect("resolve");
+    let resolved = resolve_gh(
+        &args(&["pr", "create", "--title", "foo"]),
+        dir.path(),
+        None,
+        None,
+    )
+    .expect("resolve");
     assert_eq!(resolved.operation, Operation::PrOpen);
     assert_eq!(resolved.org, "acme");
     assert_eq!(resolved.repo, "web");
@@ -90,6 +103,8 @@ fn resolve_gh_pr_create_repo_flag() {
     let resolved = resolve_gh(
         &args(&["pr", "create", "-R", "other/proj", "--title", "bar"]),
         elsewhere.path(),
+        None,
+        None,
     )
     .expect("resolve");
     assert_eq!(resolved.operation, Operation::PrOpen);
@@ -100,7 +115,8 @@ fn resolve_gh_pr_create_repo_flag() {
 #[test]
 fn resolve_gh_issue_close() {
     let dir = make_repo("https://github.com/acme/web.git", "main");
-    let resolved = resolve_gh(&args(&["issue", "close", "42"]), dir.path()).expect("resolve");
+    let resolved =
+        resolve_gh(&args(&["issue", "close", "42"]), dir.path(), None, None).expect("resolve");
     assert_eq!(resolved.operation, Operation::IssueClose);
     assert_eq!(resolved.org, "acme");
     assert_eq!(resolved.repo, "web");
@@ -110,28 +126,29 @@ fn resolve_gh_issue_close() {
 #[test]
 fn reject_non_github_url() {
     let dir = make_repo("git@gitlab.com:acme/web.git", "main");
-    let err = resolve_git(&args(&["push", "origin", "main"]), dir.path()).expect_err("non-github");
+    let err = resolve_git(&args(&["push", "origin", "main"]), dir.path(), None, None)
+        .expect_err("non-github");
     assert!(matches!(err, ResolverError::NonGithubHost(host) if host == "gitlab.com"));
 }
 
 #[test]
 fn reject_git_outside_repo() {
     let outside = tempfile::tempdir().unwrap();
-    let err = resolve_git(&args(&["push"]), outside.path()).expect_err("no repo");
+    let err = resolve_git(&args(&["push"]), outside.path(), None, None).expect_err("no repo");
     assert!(matches!(err, ResolverError::NoRepoContext(_)));
 }
 
 #[test]
 fn unknown_git_subcommand_denied() {
     let dir = make_repo("git@github.com:acme/web.git", "main");
-    let err = resolve_git(&args(&["unknown-cmd"]), dir.path()).expect_err("unknown");
+    let err = resolve_git(&args(&["unknown-cmd"]), dir.path(), None, None).expect_err("unknown");
     assert!(matches!(err, ResolverError::UnknownGitSubcommand(s) if s == "unknown-cmd"));
 }
 
 #[test]
 fn resolve_git_pull() {
     let dir = make_repo("https://github.com/acme/web.git", "main");
-    let resolved = resolve_git(&args(&["pull"]), dir.path()).expect("resolve");
+    let resolved = resolve_git(&args(&["pull"]), dir.path(), None, None).expect("resolve");
     assert_eq!(resolved.operation, Operation::Pull);
     assert_eq!(resolved.org, "acme");
     assert_eq!(resolved.repo, "web");
@@ -141,14 +158,14 @@ fn resolve_git_pull() {
 #[test]
 fn resolve_git_pull_outside_repo() {
     let outside = tempfile::tempdir().unwrap();
-    let err = resolve_git(&args(&["pull"]), outside.path()).expect_err("no repo");
+    let err = resolve_git(&args(&["pull"]), outside.path(), None, None).expect_err("no repo");
     assert!(matches!(err, ResolverError::NoRepoContext(_)));
 }
 
 #[test]
 fn resolve_git_pull_rejects_non_github() {
     let dir = make_repo("git@gitlab.com:acme/web.git", "main");
-    let err = resolve_git(&args(&["pull"]), dir.path()).expect_err("non-github");
+    let err = resolve_git(&args(&["pull"]), dir.path(), None, None).expect_err("non-github");
     assert!(matches!(err, ResolverError::NonGithubHost(h) if h == "gitlab.com"));
 }
 
@@ -157,6 +174,7 @@ fn walks_up_to_find_git_dir() {
     let dir = make_repo("git@github.com:acme/web.git", "main");
     let nested: PathBuf = dir.path().join("subdir/deep");
     fs::create_dir_all(&nested).unwrap();
-    let resolved = resolve_git(&args(&["fetch"]), &nested).expect("resolve from nested");
+    let resolved =
+        resolve_git(&args(&["fetch"]), &nested, None, None).expect("resolve from nested");
     assert_eq!(resolved.org, "acme");
 }

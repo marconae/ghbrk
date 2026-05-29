@@ -149,6 +149,8 @@ async fn daemon_handles_concurrent_connections() {
                 tool: Tool::Git,
                 args: vec!["push".into()],
                 cwd: PathBuf::from("/nonexistent/repo"),
+                remote_url: None,
+                head_branch: None,
             };
             write_frame(&mut stream, &req).await.unwrap();
             // Expect a Denied frame back (resolver/policy will deny because
@@ -185,6 +187,8 @@ async fn daemon_survives_malformed_frame() {
         tool: Tool::Git,
         args: vec!["push".into()],
         cwd: PathBuf::from("/nonexistent/repo"),
+        remote_url: None,
+        head_branch: None,
     };
     write_frame(&mut good, &req).await.unwrap();
     let frame: ServerFrame = read_frame(&mut good).await.unwrap();

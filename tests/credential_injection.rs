@@ -115,6 +115,8 @@ async fn gh_api_receives_gh_token() {
         tool: Tool::Gh,
         args: vec!["api".into(), "user".into()],
         cwd: PathBuf::from("/"),
+        remote_url: None,
+        head_branch: None,
     };
     write_frame(&mut stream, &req).await.unwrap();
 
@@ -172,6 +174,8 @@ async fn gh_passthrough_repo_view_receives_token() {
         tool: Tool::Gh,
         args: vec!["repo".into(), "view".into()],
         cwd: PathBuf::from("/"),
+        remote_url: None,
+        head_branch: None,
     };
     write_frame(&mut stream, &req).await.unwrap();
 

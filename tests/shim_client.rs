@@ -23,6 +23,8 @@ async fn capture(tool: Tool, args: Vec<String>, cwd: PathBuf, socket_path: &Path
         cwd,
         socket_path,
         "/usr/bin/git",
+        None,
+        None,
         &mut stdout,
         &mut stderr,
     )

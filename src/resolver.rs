@@ -201,28 +201,66 @@ pub fn read_head_branch(git_dir: &Path) -> Option<String> {
 }
 
 /// Resolve a `git` invocation.
-pub fn resolve_git(args: &[String], cwd: &Path) -> Result<ResolvedRequest, ResolverError> {
+pub fn resolve_git(
+    args: &[String],
+    cwd: &Path,
+    url_hint: Option<&str>,
+    branch_hint: Option<&str>,
+) -> Result<ResolvedRequest, ResolverError> {
     let subcmd =
         first_non_flag(args).ok_or_else(|| ResolverError::UnknownGitSubcommand(String::new()))?;
     match subcmd.as_str() {
-        "push" => resolve_git_push(args, cwd),
-        "fetch" => resolve_git_remote_op(args, cwd, Operation::Fetch),
-        "pull" => resolve_git_remote_op(args, cwd, Operation::Pull),
+        "push" => resolve_git_push(args, cwd, url_hint, branch_hint),
+        "fetch" => resolve_git_remote_op(args, cwd, Operation::Fetch, url_hint),
+        "pull" => resolve_git_remote_op(args, cwd, Operation::Pull, url_hint),
         "clone" => resolve_git_clone(args),
         other => Err(ResolverError::UnknownGitSubcommand(other.to_string())),
     }
 }
 
-fn resolve_git_push(args: &[String], cwd: &Path) -> Result<ResolvedRequest, ResolverError> {
-    let git_dir =
-        find_git_dir(cwd).ok_or_else(|| ResolverError::NoRepoContext(cwd.to_path_buf()))?;
-    let url = read_origin_url(&git_dir)?;
-    let remote = parse_github_remote(&url)?;
+/// Resolve the GitHub remote from a URL hint or by reading the local `.git/config`.
+///
+/// Returns `(remote, git_dir)` where `git_dir` is `Some` when a local repo was
+/// found (needed for branch resolution) and `None` when the URL came purely
+/// from the hint.
+fn resolve_remote_url(
+    hint: Option<&str>,
+    cwd: &Path,
+) -> Result<(GithubRemote, Option<PathBuf>), ResolverError> {
+    match hint {
+        Some(url) => {
+            let remote = parse_github_remote(url)?;
+            Ok((remote, None))
+        }
+        None => {
+            let git_dir =
+                find_git_dir(cwd).ok_or_else(|| ResolverError::NoRepoContext(cwd.to_path_buf()))?;
+            let url = read_origin_url(&git_dir)?;
+            let remote = parse_github_remote(&url)?;
+            Ok((remote, Some(git_dir)))
+        }
+    }
+}
+
+fn resolve_git_push(
+    args: &[String],
+    cwd: &Path,
+    url_hint: Option<&str>,
+    branch_hint: Option<&str>,
+) -> Result<ResolvedRequest, ResolverError> {
+    let (remote, git_dir) = resolve_remote_url(url_hint, cwd)?;
     let positional = positional_after_subcommand(args, "push");
     let refspec = positional.get(2).map(String::as_str);
-    let branch = match refspec {
-        Some(spec) => Some(branch_from_refspec(spec, &git_dir)),
-        None => read_head_branch(&git_dir),
+    let branch = match (refspec, branch_hint) {
+        // An explicit refspec always names the target branch. `branch_from_refspec`
+        // only reads the git dir for the HEAD/empty-local-side cases; an unreadable
+        // dir makes it fall back to the literal ref, which is correct.
+        (Some(spec), _) => Some(branch_from_refspec(spec, git_dir.as_deref().unwrap_or(cwd))),
+        // No refspec: the hint carries the current HEAD branch and avoids a
+        // broker-side read of a git dir it may not be able to access.
+        (None, Some(hint)) => Some(hint.to_string()),
+        // No refspec and no hint: fall back to reading HEAD from the local git dir.
+        (None, None) => git_dir.as_deref().and_then(read_head_branch),
     };
     Ok(ResolvedRequest {
         org: remote.org,
@@ -237,11 +275,9 @@ fn resolve_git_remote_op(
     _args: &[String],
     cwd: &Path,
     operation: Operation,
+    url_hint: Option<&str>,
 ) -> Result<ResolvedRequest, ResolverError> {
-    let git_dir =
-        find_git_dir(cwd).ok_or_else(|| ResolverError::NoRepoContext(cwd.to_path_buf()))?;
-    let url = read_origin_url(&git_dir)?;
-    let remote = parse_github_remote(&url)?;
+    let (remote, _git_dir) = resolve_remote_url(url_hint, cwd)?;
     Ok(ResolvedRequest {
         org: remote.org,
         repo: remote.repo,
@@ -331,7 +367,12 @@ fn git_global_flag_takes_value(flag: &str) -> bool {
 }
 
 /// Resolve a `gh` invocation.
-pub fn resolve_gh(args: &[String], cwd: &Path) -> Result<ResolvedRequest, ResolverError> {
+pub fn resolve_gh(
+    args: &[String],
+    cwd: &Path,
+    url_hint: Option<&str>,
+    branch_hint: Option<&str>,
+) -> Result<ResolvedRequest, ResolverError> {
     let operation = classify_gh(args)?;
     if let Operation::GhApiRead { .. } = operation {
         return Ok(ResolvedRequest {
@@ -349,15 +390,14 @@ pub fn resolve_gh(args: &[String], cwd: &Path) -> Result<ResolvedRequest, Resolv
             (org, repo, UrlScheme::Https)
         }
         None => {
-            let git_dir =
-                find_git_dir(cwd).ok_or_else(|| ResolverError::NoRepoContext(cwd.to_path_buf()))?;
-            let url = read_origin_url(&git_dir)?;
-            let remote = parse_github_remote(&url)?;
+            let (remote, _git_dir) = resolve_remote_url(url_hint, cwd)?;
             (remote.org, remote.repo, remote.scheme)
         }
     };
     let branch = if operation == Operation::PrOpen {
-        find_git_dir(cwd).and_then(|gd| read_head_branch(&gd))
+        branch_hint
+            .map(|b| b.to_string())
+            .or_else(|| find_git_dir(cwd).and_then(|gd| read_head_branch(&gd)))
     } else {
         None
     };
@@ -779,6 +819,124 @@ mod argv_tests {
         assert_eq!(
             branch_from_refspec("refs/heads/release/v1", Path::new("/nonexistent")),
             "release/v1"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Push with a URL hint and no local .git directory resolves correctly.
+    #[test]
+    fn resolve_git_push_with_url_hint() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_push_no_repo");
+        let result = resolve_git(
+            &s(&["push", "origin", "main"]),
+            &tmp,
+            Some("git@github.com:acme/web.git"),
+            None,
+        );
+        let resolved = result.expect("push with url hint should succeed");
+        assert_eq!(resolved.org, "acme");
+        assert_eq!(resolved.repo, "web");
+        assert_eq!(resolved.operation, Operation::Push);
+    }
+
+    /// Fetch with a URL hint and no local .git directory resolves correctly.
+    #[test]
+    fn resolve_git_fetch_with_url_hint() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_fetch_no_repo");
+        let result = resolve_git(
+            &s(&["fetch"]),
+            &tmp,
+            Some("git@github.com:acme/web.git"),
+            None,
+        );
+        let resolved = result.expect("fetch with url hint should succeed");
+        assert_eq!(resolved.org, "acme");
+        assert_eq!(resolved.repo, "web");
+        assert_eq!(resolved.operation, Operation::Fetch);
+    }
+
+    /// `gh pr create` with a URL hint and no local .git directory resolves to PrOpen.
+    #[test]
+    fn resolve_gh_pr_create_with_url_hint() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_gh_no_repo");
+        let result = resolve_gh(
+            &s(&["pr", "create", "--title", "x"]),
+            &tmp,
+            Some("git@github.com:acme/web.git"),
+            None,
+        );
+        let resolved = result.expect("gh pr create with url hint should succeed");
+        assert_eq!(resolved.org, "acme");
+        assert_eq!(resolved.repo, "web");
+        assert_eq!(resolved.operation, Operation::PrOpen);
+    }
+
+    /// `gh pr create` with both a URL hint and a branch hint uses the branch hint
+    /// instead of attempting a broker-side git dir read.
+    #[test]
+    fn resolve_gh_pr_create_uses_branch_hint() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_gh_branch_hint");
+        let result = resolve_gh(
+            &s(&["pr", "create", "--title", "x"]),
+            &tmp,
+            Some("git@github.com:acme/web.git"),
+            Some("feature/x"),
+        );
+        let resolved = result.expect("gh pr create with branch hint should succeed");
+        assert_eq!(resolved.org, "acme");
+        assert_eq!(resolved.repo, "web");
+        assert_eq!(resolved.operation, Operation::PrOpen);
+        assert_eq!(resolved.branch.as_deref(), Some("feature/x"));
+    }
+
+    /// An explicit push refspec must win over the HEAD branch hint. The shim
+    /// always sets `branch_hint` to the current HEAD, but `git push origin
+    /// feature/x` targets `feature/x`, not HEAD. Policy keys off the resolved
+    /// branch, so the refspec must take precedence.
+    #[test]
+    fn resolve_git_push_explicit_refspec_beats_hint() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_refspec_beats_hint");
+        let resolved = resolve_git(
+            &s(&["push", "origin", "feature/x"]),
+            &tmp,
+            Some("git@github.com:acme/web.git"),
+            Some("main"),
+        )
+        .expect("push with refspec and hint should succeed");
+        assert_eq!(resolved.branch.as_deref(), Some("feature/x"));
+    }
+
+    /// With no explicit refspec, the HEAD branch hint is used (bypassing the
+    /// broker-side file read of an unreadable git dir).
+    #[test]
+    fn resolve_git_push_uses_hint_when_no_refspec() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_push_hint_no_refspec");
+        let resolved = resolve_git(
+            &s(&["push"]),
+            &tmp,
+            Some("git@github.com:acme/web.git"),
+            Some("main"),
+        )
+        .expect("push with hint and no refspec should succeed");
+        assert_eq!(resolved.branch.as_deref(), Some("main"));
+    }
+
+    /// Push with no hint and no .git directory returns NoRepoContext.
+    #[test]
+    fn resolve_git_push_no_hint_no_repo() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_no_hint_no_repo");
+        let err = resolve_git(&s(&["push", "origin", "main"]), &tmp, None, None).unwrap_err();
+        assert!(
+            matches!(err, ResolverError::NoRepoContext(_)),
+            "expected NoRepoContext, got {err:?}"
         );
     }
 }

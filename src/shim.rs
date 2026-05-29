@@ -36,12 +36,15 @@ pub fn socket_path_from_env() -> PathBuf {
 
 /// Run the shim against `socket_path`, writing real-time output through the
 /// supplied async writers. Returns the exit code the calling process should use.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_shim_with_io<O, E>(
     tool: Tool,
     args: Vec<String>,
     cwd: PathBuf,
     socket_path: &Path,
     real_path: &str,
+    remote_url: Option<String>,
+    head_branch: Option<String>,
     stdout: &mut O,
     stderr: &mut E,
 ) -> i32
@@ -71,7 +74,13 @@ where
     };
 
     let (read_half, mut write_half) = stream.into_split();
-    let request = Request { tool, args, cwd };
+    let request = Request {
+        tool,
+        args,
+        cwd,
+        remote_url,
+        head_branch,
+    };
 
     if let Err(err) = write_frame(&mut write_half, &request).await {
         let msg = format!("ghbrk: failed to send request to broker: {err}\n");
@@ -134,8 +143,21 @@ pub async fn run_shim(
     cwd: PathBuf,
     socket_path: &Path,
     real_path: &str,
+    remote_url: Option<String>,
+    head_branch: Option<String>,
 ) -> i32 {
     let mut out = tokio::io::stdout();
     let mut err = tokio::io::stderr();
-    run_shim_with_io(tool, args, cwd, socket_path, real_path, &mut out, &mut err).await
+    run_shim_with_io(
+        tool,
+        args,
+        cwd,
+        socket_path,
+        real_path,
+        remote_url,
+        head_branch,
+        &mut out,
+        &mut err,
+    )
+    .await
 }
