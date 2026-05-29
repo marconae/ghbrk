@@ -1,6 +1,6 @@
 # ghbrk
 
-`ghbrk` is a policy-enforcing proxy that lets AI coding agents run `git` and `gh` operations using a shared credential, without ever having direct access to that credential. A privileged daemon holds the SSH key and GitHub token; agents call `git` and `gh` normally through thin shim symlinks. Every operation is checked against a YAML policy before the real command runs.
+`ghbrk` is a policy-enforcing broker that lets AI coding agents run `git` and `gh` operations using a shared credential, without ever having direct access to that credential. A privileged daemon holds the SSH key and GitHub token; agents call `git` and `gh` normally through thin shim symlinks. Every network operation is checked against a YAML policy before the real command runs.
 
 ## How it works
 
@@ -11,7 +11,7 @@ Agent process (e.g. Claude Code)
   ▼
 ghbrk shim  ──────────────────────────────────────────────────────┐
   │  connects to /var/run/ghbrk/broker.sock                       │
-  │  sends: { tool, args, cwd }                                   │
+  │  sends: { tool, args, cwd, remote_url?, branch? }             │
   ▼                                                               │
 ghbrk daemon (runs as system user "ghbrk")                        │
   │  reads SO_PEERCRED → caller UID → Unix username               │
@@ -37,6 +37,73 @@ The agent's `PATH` is configured so the shim's `git`/`gh` symlinks come before `
 - systemd (for the provided service unit)
 
 macOS is not supported in v1.
+
+## Getting Started
+
+This guide covers the minimal steps to get `ghbrk` running. See the full [Configuration](#configuration) section for all options.
+
+### Prerequisites
+
+- Linux system with systemd
+- Rust stable toolchain installed (`rustup show`)
+- `git` and `gh` present at `/usr/bin/git` and `/usr/bin/gh`
+- `sudo` access
+
+### Build and install
+
+```bash
+git clone https://github.com/marconae/ghbrk
+cd ghbrk
+cargo build --release
+sudo ./deploy/linux/install.sh
+```
+
+The install script creates the `ghbrk` system user, installs the binary and shim symlinks, writes a starter policy, and enables the systemd service. Run it again at any time — it is idempotent.
+
+### Create credentials
+
+Replace `alice` with your Unix username throughout.
+
+```bash
+# SSH key (for git@github.com and ssh:// remotes)
+sudo mkdir -p /etc/ghbrk/credentials/alice
+sudo install -m 0600 -o ghbrk ~/.ssh/my_agent_key /etc/ghbrk/credentials/alice/id_rsa
+
+# GitHub token (for HTTPS remotes and all gh operations)
+printf '%s' "$GITHUB_TOKEN" | sudo tee /etc/ghbrk/credentials/alice/token > /dev/null
+sudo chown ghbrk /etc/ghbrk/credentials/alice/token
+sudo chmod 0600 /etc/ghbrk/credentials/alice/token
+```
+
+The token needs at minimum the `repo` scope. See [Credentials](#credentials) for scope guidance.
+
+### Write a minimal policy
+
+Edit `/etc/ghbrk/policy.yaml` (or let the starter file created by `install.sh` serve as a base):
+
+```yaml
+rules:
+  - user: alice
+    org: your-org
+    repo: "*"
+    operations: [push, fetch, pull]
+    effect: allow
+```
+
+Reload the policy:
+
+```bash
+sudo systemctl restart ghbrk
+```
+
+### Verify and run
+
+```bash
+ghbrk check          # verifies SSH key, token, and GitHub API reachability
+git push             # routes through the broker; check /var/log/ghbrk/audit.log
+```
+
+See [Configuration](#configuration) for the full policy reference, additional credential options, and environment variables.
 
 ## Installation
 
@@ -65,6 +132,18 @@ systemctl status ghbrk
 journalctl -u ghbrk -f
 ghbrk check          # verify SSH key, token, and GitHub API reachability
 ```
+
+## Commands
+
+### `ghbrk check`
+
+Verifies that the daemon is reachable, the stored SSH key is well-formed, the GitHub token is present, and the GitHub API responds. Run this after installation or after changing credentials.
+
+```bash
+ghbrk check
+```
+
+Exit code is `0` on success, non-zero if any check fails. Failure output is printed to stderr.
 
 ## Configuration
 
@@ -223,7 +302,7 @@ Only `push` evaluates the `branches` field. For all other operations the branch 
 
 **Repo resolution:**
 
-- `git` commands: walks up from the current directory to find `.git/config` and reads the origin remote URL.
+- `git` commands: The shim reads the origin remote URL from `.git/config` in the invoking user's context and forwards it to the broker; this works even when the user's home directory is not accessible to the broker process.
 - `gh` commands: uses the `-R`/`--repo` flag if present; otherwise falls back to the git repo context of the working directory.
 - Supported remote URL formats: `git@github.com:org/repo`, `ssh://git@github.com/org/repo`, `https://github.com/org/repo` (with or without `.git` suffix).
 - Non-GitHub hosts (GitLab, Bitbucket, etc.) are rejected.
