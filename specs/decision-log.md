@@ -9,7 +9,7 @@
 
 **Date:** 2026-05-27
 **Plan:** `fix-local-git-gh-passthrough`
-**Status:** Accepted
+**Status:** Superseded by ADR-017
 
 ### Context
 
@@ -36,11 +36,13 @@ Local commands (`git status`, `git add`, `git log`, `gh auth status`, etc.) exec
 
 **Date:** 2026-05-27
 **Plan:** `fix-local-git-gh-passthrough`
-**Status:** Accepted
+**Status:** Superseded by ADR-017
 
 ### Context
 
 When the shim decides a command is passthrough, it must hand execution to the real binary. The approach chosen determines how stdio, signals, tty control, and exit codes are handled.
+
+> Superseded note (`change-explicit-gateway`): client-side shim passthrough is removed. Broker-side `gh` passthrough is retained, but execution flows through the daemon executor and streaming pipeline rather than client-side `exec()`.
 
 ### Decision
 
@@ -118,7 +120,7 @@ Operators can write separate rules for `fetch` and `pull`. Existing policies tha
 
 **Date:** 2026-05-28
 **Plan:** `add-pull-fix-path-coverage`
-**Status:** Accepted
+**Status:** Superseded by ADR-017
 
 ### Context
 
@@ -148,7 +150,7 @@ Most PATH-resolved `git`/`gh` callers (shells, agents, CI scripts) are automatic
 
 **Date:** 2026-05-28
 **Plan:** `add-pull-fix-path-coverage`
-**Status:** Accepted
+**Status:** Superseded by ADR-017
 
 ### Context
 
@@ -176,7 +178,7 @@ Operators must understand that hardcoded-path callers bypass ghbrk. The limitati
 
 **Date:** 2026-05-28
 **Plan:** `add-pull-fix-path-coverage`
-**Status:** Accepted
+**Status:** Superseded by ADR-018
 
 ### Context
 
@@ -401,11 +403,13 @@ A `mock-github` HTTPS service is added to the Docker compose stack, returning a 
 
 **Date:** 2026-05-29
 **Plan:** `fix-credential-access-check-and-gh-passthrough`
-**Status:** Accepted
+**Status:** Superseded by ADR-017
 
 ### Context
 
 `ghbrk check` originally ran as the invoking Unix user and directly read the credential directory `/etc/ghbrk/credentials/<user>/`. That directory is owned by the `ghbrk` system user with mode `0700`, so a normal agent user cannot `stat()` or read its contents. This caused a "Permission denied" failure for any agent or operator user who ran `ghbrk check`. A privileged path to credential inspection was needed without loosening the `0700` isolation or introducing a new setuid/sudo helper.
+
+> Superseded note (`change-explicit-gateway`): the standalone `ghbrk check` subcommand is absorbed into `ghbrk doctor`. The broker-side `Tool::Check` credential mechanism established here is retained and reused by `doctor`.
 
 ### Decision
 
@@ -448,4 +452,85 @@ The shim previously classified `gh` invocations locally: broker-ops (`pr`, `issu
 
 ### Consequences
 
-All `gh` invocations receive `GH_TOKEN` injection. The broker audit log now records passthrough `gh` calls with `decision=passthrough`, keeping them visible and distinguishable from policy-evaluated `Allow` decisions. The `gh_is_broker_op` function is made `pub` so the broker can call it from `broker.rs`. The operator's access gate remains unchanged: `ghbrk-clients` group membership controls whether the shim can reach the broker socket.
+All `gh` invocations receive `GH_TOKEN` injection. The broker audit log now records passthrough `gh` calls with `decision=passthrough`, keeping them visible and distinguishable from policy-evaluated `Allow` decisions. The `gh_is_broker_op` function is made `pub` so the broker can call it from `broker.rs`. The operator's access gate remains unchanged: `ghbrk-clients` group membership controls whether the gateway client can reach the broker socket.
+
+---
+
+## ADR-017: Explicit gateway replaces the transparent shim
+
+**Date:** 2026-05-30
+**Plan:** `change-explicit-gateway`
+**Status:** Accepted
+
+### Context
+
+The transparent shim symlinked `ghbrk` as `git` and `gh` early in the agent's `PATH`, silently intercepting every invocation and classifying it client-side into local-passthrough vs broker-mediated. For an AI agent this makes privileged, machine-leaving behaviour invisible: the agent cannot tell from the command alone whether it is hitting the network under brokered credentials, and the client-side classifier must perfectly mirror git/gh semantics or it silently misroutes. Invisible privileged authority gives agents no way to reason about the security boundary.
+
+### Decision
+
+Remove all transparent PATH-interception: no argv[0] symlink dispatch, no client-side local/remote passthrough classifier, and no shim config for real-binary paths. Privileged authority is requested explicitly by name via `ghbrk git <remote-subcommand>` and `ghbrk gh <subcommand>`. The security boundary becomes part of the interface.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Explicit `ghbrk git`/`ghbrk gh` verb gateway, no symlinks | ✓ Chosen — privilege is requested by name and never inferred; the boundary is inspectable rather than hidden |
+| Keep an optional `install-shims` transparent compat mode | ✗ Rejected — a hidden mode re-introduces the invisible-privilege problem the redesign exists to eliminate |
+
+### Consequences
+
+Agents call plain `git`/`gh` for local work and `ghbrk git`/`ghbrk gh` only when an operation leaves the machine. No symlinks are created at install time, and there is no `install-shims` step. The mental model is crisp: ghbrk does exactly one thing — broker remote operations. Existing automation that relied on transparent interception must be updated to call the gateway explicitly (breaking change; crate bumped to 0.5.0).
+
+---
+
+## ADR-018: ghbrk scope is remote/authenticated operations only
+
+**Date:** 2026-05-30
+**Plan:** `change-explicit-gateway`
+**Status:** Accepted
+
+### Context
+
+With the explicit gateway, a decision was needed on what `ghbrk git <local-subcommand>` (e.g. `status`, `log`, `commit`) should do. Allowing it to passthrough-exec the local binary would re-create the client-side classifier and the confusing "is this brokered?" mental model the redesign removes.
+
+### Decision
+
+`ghbrk git <local-subcommand>` returns a clear guidance error before any socket connection, telling the user to run the command with plain `git`. Only machine-leaving (remote/authenticated) operations are relayed to the broker. `ghbrk` constrains itself strictly to the remote/authenticated boundary.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Reject local git subcommands with a pre-connect guidance error | ✓ Chosen — keeps the authority boundary crisp; ghbrk only ever brokers remote operations |
+| Let `ghbrk git status` passthrough-exec the local binary | ✗ Rejected — re-creates the client-side classifier and the confusing brokered-or-not mental model |
+
+### Consequences
+
+The gateway never executes local git. Users get an immediate, actionable error directing them to plain `git`. As defence-in-depth the broker still resolves every request and denies any local-only subcommand that reaches the socket from a hand-crafted client, so the default-deny invariant holds at the trust boundary.
+
+---
+
+## ADR-019: Resolver stays broker-side; feature relocated to the daemon domain
+
+**Date:** 2026-05-30
+**Plan:** `change-explicit-gateway`
+**Status:** Accepted
+
+### Context
+
+The resolver maps `(tool, args, cwd)` to a normalised `(operation, org, repo, branch?)` tuple. It already ran broker-side (`src/broker.rs::resolve_request`) but its spec feature was filed under the now-removed `shim/` domain. With the shim gone, a decision was needed on where resolution belongs and where its spec should live.
+
+### Decision
+
+Keep the resolver in the broker, unchanged, and relocate its spec feature from `shim/` to `daemon/resolver`. The gateway client stays a thin relay; the broker remains the single authoritative mapping from command to operation.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Keep resolver broker-side; relocate the feature to `daemon/resolver` | ✓ Chosen — resolution was always a broker-side concern; a single authoritative mapping stays inside the trust boundary |
+| Delete the resolver and have the client send a pre-resolved tuple | ✗ Rejected — leaks repo-context parsing out of the trust boundary and lets a malicious client spoof the resolved operation |
+
+### Consequences
+
+Parsing and repo-context logic stay inside the privileged daemon, so a client cannot spoof the operation it is requesting. The relocation is behaviour-preserving — all 15 resolver scenarios move unchanged to `daemon/resolver`. The client is reduced to relaying `(tool, args, cwd)` and streaming the response.

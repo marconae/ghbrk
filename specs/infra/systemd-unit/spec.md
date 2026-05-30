@@ -8,7 +8,7 @@ The unit file lives at `deploy/linux/ghbrk.service` and is installed by `deploy/
 
 The socket parent directory `/run/ghbrk/` is created on the host's `/run` tmpfs at every boot by `systemd-tmpfiles` using the snippet at `deploy/linux/ghbrk.tmpfiles` (installed to `/etc/tmpfiles.d/ghbrk.conf`). The unit exposes the directory via `ReadWritePaths=/run/ghbrk` so the daemon can bind its socket there under `ProtectSystem=strict`.
 
-`RuntimeDirectory=` is intentionally absent: combined with `ProtectSystem=strict`, it creates the directory inside the service's private mount namespace, making the socket invisible to host-namespace processes (the shim).
+`RuntimeDirectory=` is intentionally absent: combined with `ProtectSystem=strict`, it creates the directory inside the service's private mount namespace, making the socket invisible to host-namespace processes (the gateway client invoked as `ghbrk git`/`ghbrk gh`).
 
 ## Scenarios
 

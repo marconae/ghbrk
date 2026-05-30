@@ -1,6 +1,6 @@
 # Feature: executor-streaming
 
-Spawns the real `git` or `gh` binary inside the daemon, applying the injected credentials and resolved cwd, then streams stdout and stderr back to the shim in real time over the wire protocol and finally emits the child's exit code.
+Spawns the real `git` or `gh` binary inside the daemon, applying the injected credentials and resolved cwd, then streams stdout and stderr back to the gateway client in real time over the wire protocol and finally emits the child's exit code.
 
 ## Background
 
@@ -8,7 +8,7 @@ The daemon spawns the child with stdout and stderr captured (pipe), stdin closed
 
 ## Scenarios
 
-### Scenario: Child stdout is streamed to shim as StdoutChunk frames
+### Scenario: Child stdout is streamed to gateway client as StdoutChunk frames
 
 * *GIVEN* the daemon spawned `git status` whose stdout produces 3 separate writes
 * *WHEN* the child writes each chunk
@@ -37,7 +37,7 @@ The daemon spawns the child with stdout and stderr captured (pipe), stdin closed
 
 * *GIVEN* a child writes stdout, then stderr, then stdout in that order
 * *WHEN* the executor forwards frames
-* *THEN* the shim MUST receive a `StdoutChunk`, then a `StderrChunk`, then a `StdoutChunk`
+* *THEN* the gateway client MUST receive a `StdoutChunk`, then a `StderrChunk`, then a `StdoutChunk`
 * *AND* stdout and stderr bytes MUST NOT be combined into a single chunk
 
 ### Scenario: Killed child reports non-zero exit
@@ -58,4 +58,4 @@ The daemon spawns the child with stdout and stderr captured (pipe), stdin closed
 * *GIVEN* the child produces 100 MiB of stdout in many chunks
 * *WHEN* the executor streams the output
 * *THEN* the daemon's resident memory MUST NOT grow unboundedly with total output size
-* *AND* the shim MUST receive the bytes in order
+* *AND* the gateway client MUST receive the bytes in order

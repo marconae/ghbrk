@@ -1,8 +1,10 @@
 # Feature: broker-server
 
-Provides the `ghbrk daemon` Unix socket server that accepts shim connections, identifies callers via SO_PEERCRED, and orchestrates per-request policy evaluation and execution.
+Provides the `ghbrk daemon` Unix socket server that accepts gateway connections, identifies callers via SO_PEERCRED, and orchestrates per-request policy evaluation and execution.
 
 ## Background
+
+The broker is reached only via the explicit `ghbrk git` / `ghbrk gh` gateway; the transparent argv[0] shim and client-side local/remote split are removed. The `ghbrk git` gateway filters local-only git subcommands before any socket connection, so in normal operation the broker receives only remote/authenticated git operations plus all `gh` invocations (for credential injection). As defence-in-depth the broker still resolves every request and denies anything it cannot map to a known remote operation. All prior binding, peer-credential, and concurrency behaviour is unchanged.
 
 The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-clients`. The supported deployment sets the daemon's primary group to `ghbrk-clients` via the systemd unit's `Group=ghbrk-clients` directive, so the socket inherits the correct group on `bind(2)` without requiring a runtime `chown`. A defence-in-depth `chown` remains for daemons started outside systemd or with a non-standard `Group=`; when that chown fails, the daemon logs at `error` level with diagnostic guidance. Linux only — peer credential reading uses `SO_PEERCRED`. Each accepted connection is handled by an independent Tokio task. The daemon must remain running across malformed-request errors and child process failures; it only exits on SIGINT, SIGTERM, or fatal bind errors.
 
@@ -29,14 +31,14 @@ The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-
 
 ### Scenario: Daemon resolves caller UID via SO_PEERCRED
 
-* *GIVEN* a shim connects from a process running as UID 1001
+* *GIVEN* a gateway client connects from a process running as UID 1001
 * *WHEN* the daemon accepts the connection
 * *THEN* the daemon MUST read the peer UID via `SO_PEERCRED`
 * *AND* the daemon MUST resolve UID 1001 to its Unix username via the password database
 
 ### Scenario: Daemon rejects request when caller UID has no Unix user
 
-* *GIVEN* a shim connects from a process running as UID 65534
+* *GIVEN* a gateway client connects from a process running as UID 65534
 * *AND* UID 65534 does not resolve to a known username
 * *WHEN* the daemon attempts to map the UID
 * *THEN* the daemon MUST send a `Denied { reason: "unknown caller" }` frame
@@ -45,7 +47,7 @@ The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-
 ### Scenario: Daemon handles multiple concurrent connections
 
 * *GIVEN* the daemon is running
-* *WHEN* three shims connect simultaneously, each issuing a different request
+* *WHEN* three gateway clients connect simultaneously, each issuing a different request
 * *THEN* the daemon MUST process all three connections concurrently
 * *AND* none of the connections MUST block another from receiving its response
 
@@ -63,3 +65,12 @@ The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-
 * *THEN* the daemon MUST stop accepting new connections
 * *AND* the daemon MUST remove `/var/run/ghbrk/broker.sock`
 * *AND* the daemon MUST exit with status zero
+
+### Scenario: Broker denies a local-only git subcommand that bypasses the gateway filter
+
+* *GIVEN* the broker is running
+* *AND* a request arrives carrying a local-only git subcommand such as `status` (e.g. from a hand-crafted client)
+* *WHEN* the broker resolves the request
+* *THEN* the broker MUST NOT execute a git process for the request
+* *AND* the broker MUST send a `Denied` frame
+* *AND* the broker MUST write a deny entry to the audit log

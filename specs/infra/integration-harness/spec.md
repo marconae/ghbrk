@@ -1,6 +1,6 @@
 # Feature: integration-harness
 
-Provides a Docker-based test fixture that runs a real bare-git SSH server and a developer-tools container so end-to-end shim → daemon → git/gh operations can be exercised in CI without depending on GitHub for the SSH path.
+Provides a Docker-based test fixture that runs a real bare-git SSH server and a developer-tools container so end-to-end gateway → daemon → git/gh operations can be exercised in CI without depending on GitHub for the SSH path.
 
 ## Background
 
@@ -17,26 +17,26 @@ To prove the `gh api` → broker → GitHub path end-to-end without a real GitHu
 * *THEN* the bare repo `repo.git` MUST be reachable via `ssh://git@<container>/srv/git/repo.git`
 * *AND* the test MUST be able to clone the repo using the generated key
 
-### Scenario: Push through shim to harness succeeds when policy allows
+### Scenario: Push through the gateway to harness succeeds when policy allows
 
 * *GIVEN* the daemon is running with a policy allowing push to the harness repo for the test user
 * *AND* the test SSH key is registered in the daemon's credentials directory
-* *WHEN* a test process invokes the shim with `git push origin main` against the harness URL
+* *WHEN* a test process invokes `ghbrk git push origin main` against the harness URL
 * *THEN* the push MUST succeed
 * *AND* the bare repo's `refs/heads/main` MUST point at the pushed commit
 
-### Scenario: Push through shim to harness is rejected when policy denies
+### Scenario: Push through the gateway to harness is rejected when policy denies
 
 * *GIVEN* the daemon's policy has no matching allow rule for push to the harness repo
-* *WHEN* a test process invokes the shim with `git push origin main`
-* *THEN* the shim MUST exit with a non-zero status
+* *WHEN* a test process invokes `ghbrk git push origin main`
+* *THEN* the gateway client MUST exit with a non-zero status
 * *AND* the bare repo's `refs/heads/main` MUST NOT be updated
 * *AND* the audit log MUST contain a deny record
 
-### Scenario: Clone through shim to harness streams progress
+### Scenario: Clone through the gateway to harness streams progress
 
 * *GIVEN* the daemon is running and policy allows clone
-* *WHEN* a test process invokes the shim with `git clone <harness-url> /tmp/clone`
+* *WHEN* a test process invokes `ghbrk git clone <harness-url> /tmp/clone`
 * *THEN* the clone MUST succeed
 * *AND* `/tmp/clone/.git` MUST exist after the command
 
@@ -60,7 +60,7 @@ To prove the `gh api` → broker → GitHub path end-to-end without a real GitHu
 * *GIVEN* the compose project is up with the `mock-github` HTTPS service running and the broker configured with `GH_HOST=mock-github`
 * *AND* the daemon is running with a policy allowing `gh_api_read` for the test user
 * *AND* a synthetic token is present in the daemon's credentials directory with mode `0600`
-* *WHEN* a test process invokes the shim with `gh api user`
+* *WHEN* a test process invokes `ghbrk gh api user`
 * *THEN* the command MUST exit with status zero
 * *AND* the streamed stdout MUST contain `"login": "test-user"` from the mock API response
 
@@ -69,7 +69,7 @@ To prove the `gh api` → broker → GitHub path end-to-end without a real GitHu
 * *GIVEN* the compose project is up with the `mock-github` HTTPS service running and the broker configured with `GH_HOST=mock-github`
 * *AND* the daemon is running with a policy allowing `gh_api_read` for the test user
 * *AND* no token file exists in the daemon's credentials directory for the test user
-* *WHEN* a test process invokes the shim with `gh api user`
+* *WHEN* a test process invokes `ghbrk gh api user`
 * *THEN* the command MUST exit with a non-zero status
 * *AND* the streamed stderr MUST indicate the token is missing
 
