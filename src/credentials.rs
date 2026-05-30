@@ -151,10 +151,23 @@ fn read_token(path: &Path) -> Result<String, CredentialError> {
 /// keys on first contact.
 pub fn ssh_env(creds: &Credentials) -> Vec<(String, String)> {
     let key = creds.ssh_key_path.display();
-    vec![(
+    let mut env = vec![(
         "GIT_SSH_COMMAND".to_string(),
         format!("ssh -i {key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"),
-    )]
+    )];
+    env.extend(git_safe_dir_env());
+    env
+}
+
+/// Injects `GIT_CONFIG_*` vars that set `safe.directory = *` so git accepts
+/// repositories owned by a different user. Required when the broker (running as
+/// the `ghbrk` system user) operates on repos owned by the calling user.
+fn git_safe_dir_env() -> Vec<(String, String)> {
+    vec![
+        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+        ("GIT_CONFIG_KEY_0".to_string(), "safe.directory".to_string()),
+        ("GIT_CONFIG_VALUE_0".to_string(), "*".to_string()),
+    ]
 }
 
 /// Builds env vars for an HTTPS git operation. Returns the env vars and the
@@ -182,7 +195,7 @@ pub fn https_git_env(creds: &Credentials) -> Result<HttpsGitEnv, CredentialError
     perms.set_mode(0o700);
     fs::set_permissions(script.path(), perms)?;
 
-    let vars = vec![
+    let mut vars = vec![
         (
             "GIT_ASKPASS".to_string(),
             script.path().display().to_string(),
@@ -190,6 +203,7 @@ pub fn https_git_env(creds: &Credentials) -> Result<HttpsGitEnv, CredentialError
         ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
         ("GHBRK_TOKEN".to_string(), creds.token.clone()),
     ];
+    vars.extend(git_safe_dir_env());
     Ok(HttpsGitEnv {
         vars,
         askpass_script: script,
@@ -334,12 +348,14 @@ mod tests {
             token: "secret".into(),
         };
         let env = ssh_env(&creds);
-        assert_eq!(env.len(), 1);
-        assert_eq!(env[0].0, "GIT_SSH_COMMAND");
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert_eq!(
-            env[0].1,
+            map["GIT_SSH_COMMAND"],
             "ssh -i /etc/ghbrk/credentials/alice/id_rsa -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"
         );
+        assert_eq!(map["GIT_CONFIG_COUNT"], "1");
+        assert_eq!(map["GIT_CONFIG_KEY_0"], "safe.directory");
+        assert_eq!(map["GIT_CONFIG_VALUE_0"], "*");
     }
 
     /// Serializes tests that mutate the process-global `GH_HOST` env var.

@@ -80,6 +80,12 @@ sudo chmod 0600 /etc/ghbrk/credentials/alice/token
 
 The token needs at minimum the `repo` scope. See [Credentials](#credentials) for scope guidance.
 
+**Home directory traversal:** The broker daemon runs as the `ghbrk` system user. If your home directory is mode `0700` (the default on many distros), the daemon cannot enter it to run git operations. Add the execute bit for others so the daemon can traverse — without granting read access to directory contents:
+
+```bash
+chmod o+x ~
+```
+
 ### Write a minimal policy
 
 Edit `/etc/ghbrk/policy.yaml` (or let the starter file created by `install.sh` serve as a base):
