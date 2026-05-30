@@ -1,33 +1,36 @@
 # ghbrk
 
-`ghbrk` is a policy-enforcing broker that lets AI coding agents run `git` and `gh` operations using a shared credential, without ever having direct access to that credential. A privileged daemon holds the SSH key and GitHub token; agents call `git` and `gh` normally through thin shim symlinks. Every network operation is checked against a YAML policy before the real command runs.
+`ghbrk` is a policy-enforcing broker that lets AI coding agents run `git` and `gh` operations using a shared credential, without ever having direct access to that credential. A privileged daemon holds the SSH key and GitHub token; agents call `ghbrk git push` / `ghbrk gh pr create` explicitly for remote operations and use plain `git`/`gh` for everything local. Every brokered operation is checked against a YAML policy before the real command runs.
 
 ## How it works
 
 ```
 Agent process (e.g. Claude Code)
   │
-  │  calls git/gh via symlinks in PATH
+  │  local/read-only: calls plain git/gh directly
+  │
+  │  remote/authenticated: calls ghbrk git <sub> or ghbrk gh <sub>
   ▼
-ghbrk shim  ──────────────────────────────────────────────────────┐
-  │  connects to /var/run/ghbrk/broker.sock                       │
-  │  sends: { tool, args, cwd, remote_url?, branch? }             │
-  ▼                                                               │
-ghbrk daemon (runs as system user "ghbrk")                        │
-  │  reads SO_PEERCRED → caller UID → Unix username               │
-  │  reads /etc/ghbrk/credentials/<username>/{id_rsa,token}       │
-  │  evaluates /etc/ghbrk/policy.yaml                             │
-  │                                                               │
-  ├─ ALLOW → spawns real git/gh with credential env vars          │
-  │           streams stdout/stderr back to shim ─────────────────┘
+ghbrk binary (clap dispatch)
+  │  rejects local-only git subcommands with a guidance error
+  │  connects to /var/run/ghbrk/broker.sock
+  │  sends: { tool, args, cwd }
+  ▼
+ghbrk daemon (runs as system user "ghbrk")
+  │  reads SO_PEERCRED → caller UID → Unix username
+  │  reads /etc/ghbrk/credentials/<username>/{id_rsa,token}
+  │  evaluates /etc/ghbrk/policy.yaml
+  │
+  ├─ ALLOW → spawns real git/gh with credential env vars
+  │           streams stdout/stderr back to caller
   │           writes allow record to audit log
   │
-  └─ DENY  → sends denial reason to shim (printed to stderr)
+  └─ DENY  → sends denial reason (printed to stderr)
               writes deny record to audit log
-              shim exits non-zero
+              ghbrk exits non-zero
 ```
 
-The agent's `PATH` is configured so the shim's `git`/`gh` symlinks come before `/usr/bin`. The interception is transparent — the agent sees normal stdio and exit codes.
+The privilege boundary is explicit: agents choose to call `ghbrk git push` when they need to reach the network. There are no symlinks, no transparent interception, and no hidden credential injection.
 
 ## Requirements
 
@@ -58,7 +61,7 @@ cargo build --release
 sudo ./deploy/linux/install.sh
 ```
 
-The install script creates the `ghbrk` system user, installs the binary and shim symlinks, writes a starter policy, and enables the systemd service. Run it again at any time — it is idempotent.
+The install script creates the `ghbrk` system user, installs the binary, writes a starter policy, and enables the systemd service. No `git`/`gh` symlinks are created. Run it again at any time — it is idempotent.
 
 ### Create credentials
 
@@ -99,8 +102,8 @@ sudo systemctl restart ghbrk
 ### Verify and run
 
 ```bash
-ghbrk check          # verifies SSH key, token, and GitHub API reachability
-git push             # routes through the broker; check /var/log/ghbrk/audit.log
+ghbrk doctor         # verifies daemon reachability, SSH key, token, and policy health
+ghbrk git push       # routes through the broker; check /var/log/ghbrk/audit.log
 ```
 
 See [Configuration](#configuration) for the full policy reference, additional credential options, and environment variables.
@@ -115,35 +118,113 @@ sudo ./deploy/linux/install.sh
 The install script (idempotent; safe to re-run):
 
 1. Creates system user `ghbrk` (no login shell) and group `ghbrk-clients`
-2. Installs the binary to `/usr/local/bin/ghbrk`; creates `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks pointing at it
+2. Installs the binary to `/usr/local/bin/ghbrk` (no `git`/`gh` symlinks are created)
 3. Creates directories with strict permissions:
    - `/etc/ghbrk/credentials/` — mode `0700`, owned by `ghbrk`
    - `/run/ghbrk/` — mode `2750`, group `ghbrk-clients`; managed by `systemd-tmpfiles` at every boot via `/etc/tmpfiles.d/ghbrk.conf`
    - `/var/log/ghbrk/` — mode `0750`, group `ghbrk-clients`
 4. Writes a starter policy to `/etc/ghbrk/policy.yaml` if one does not exist
-5. Writes a starter shim config to `/etc/ghbrk/config.yaml` if one does not exist
-6. Installs the systemd unit and `tmpfiles.d` snippet; enables and starts the service
-7. Adds `$SUDO_USER` to `ghbrk-clients` (effective at next login)
+5. Installs the systemd unit and `tmpfiles.d` snippet; enables and starts the service
+6. Adds `$SUDO_USER` to `ghbrk-clients` (effective at next login)
 
-Check the service and verify credentials:
+Check the service and verify health:
 
 ```bash
 systemctl status ghbrk
 journalctl -u ghbrk -f
-ghbrk check          # verify SSH key, token, and GitHub API reachability
+ghbrk doctor         # verify daemon, SSH key, token, and policy
 ```
 
 ## Commands
 
-### `ghbrk check`
+### `ghbrk daemon`
 
-Verifies that the daemon is reachable, the stored SSH key is well-formed, the GitHub token is present, and the GitHub API responds. Run this after installation or after changing credentials.
+Starts the broker server. Normally managed by systemd; you do not need to invoke this manually.
+
+### `ghbrk git <remote-subcommand> [args]`
+
+Relays a remote git operation to the broker. Only remote-capable subcommands (`push`, `fetch`, `pull`, `clone`) are accepted; local-only subcommands return a guidance error on stderr without contacting the broker.
 
 ```bash
-ghbrk check
+ghbrk git push origin main
+ghbrk git fetch
+ghbrk git pull --rebase
+ghbrk git clone git@github.com:acme/platform
 ```
 
-Exit code is `0` on success, non-zero if any check fails. Failure output is printed to stderr.
+### `ghbrk gh <subcommand> [args]`
+
+Relays any `gh` invocation to the broker. The broker injects `GH_TOKEN` from stored credentials and, for mutating operations, evaluates the configured policy.
+
+```bash
+ghbrk gh pr create --title "My PR" --body "..."
+ghbrk gh pr merge 42 --squash
+ghbrk gh issue comment 7 --body "Fixed in abc123"
+```
+
+### `ghbrk doctor`
+
+Checks daemon reachability, credential presence and file-permission validity, and policy-file parsability. Prints one status line per check; exits zero only when all checks pass.
+
+```bash
+ghbrk doctor
+```
+
+### `ghbrk explain <cmd> [args]`
+
+Dry run: sends the command to the broker, which resolves the operation and evaluates policy without executing anything. Reports the would-be decision and which credential would be injected.
+
+```bash
+ghbrk explain git push origin main    # see what the broker would do
+ghbrk explain git status              # reports: local operation, out of scope
+```
+
+### `ghbrk policy <org>/<repo>`
+
+Lists which operations the calling user is allowed and forbidden to perform on the specified repository, based on the current policy file.
+
+```bash
+ghbrk policy acme/web
+```
+
+## Agent integration
+
+Agents use plain `git`/`gh` for local and read-only operations, and `ghbrk git`/`ghbrk gh` for remote and authenticated operations. No `PATH` manipulation or symlink setup is required.
+
+```bash
+# Local operations (no brokering, plain git)
+git status
+git add -p
+git commit -m "fix: correct off-by-one"
+git log --oneline -10
+git diff HEAD~1
+
+# Brokered remote operations (explicit gateway)
+ghbrk git push origin feature/my-branch
+ghbrk git fetch
+ghbrk git pull --rebase
+ghbrk gh pr create --title "My PR" --fill
+ghbrk gh pr merge 42 --squash
+```
+
+The agent must be a member of the `ghbrk-clients` group so it can reach the socket:
+
+```bash
+sudo usermod -aG ghbrk-clients alice
+```
+
+If the broker socket is not at the default path, set `GHBRK_SOCKET` in the agent's environment.
+
+### Guidance errors
+
+If an agent mistakenly calls `ghbrk git status` (a local subcommand), `ghbrk` exits non-zero immediately — before contacting the broker — and prints a message like:
+
+```
+error: 'git status' is a local operation; run 'git status' directly.
+       ghbrk only brokers remote operations: push, fetch, pull, clone.
+```
+
+This makes the boundary self-documenting.
 
 ## Configuration
 
@@ -217,39 +298,9 @@ sudo chmod 0600 /etc/ghbrk/credentials/alice/token
 
 The token needs the scopes required by the operations you allow (`repo`, `workflow`, etc.). Token contents are never written to logs.
 
-### Shim config
-
-`/etc/ghbrk/config.yaml` tells the shim where the real `git` and `gh` binaries live. The file is **optional** — when absent the shim falls back to the compiled-in defaults (`/usr/bin/git` and `/usr/bin/gh`).
-
-```yaml
-real_git: /usr/bin/git
-real_gh: /usr/bin/gh
-```
-
-Set these only if your system installs the binaries at non-standard paths (e.g. `/usr/local/bin/git` from Homebrew-on-Linux or a custom build). A malformed file is a fatal error; a missing file is silently ignored.
-
-## Agent setup
-
-`install.sh` creates system-wide `/usr/local/bin/git` and `/usr/local/bin/gh` symlinks pointing at the `ghbrk` binary. Because `/usr/local/bin` precedes `/usr/bin` in the standard system `PATH`, any agent process picks up the shim automatically — no per-user `PATH` changes needed.
-
-The agent must also be a member of the `ghbrk-clients` group so it can reach the socket:
-
-```bash
-sudo usermod -aG ghbrk-clients alice
-```
-
-To verify the shim is active in the agent's session:
-
-```bash
-which git   # should print /usr/local/bin/git
-git status  # passes through to the real git; no broker contact required
-```
-
-If the broker socket is not at the default path, set `GHBRK_SOCKET` in the agent's environment.
-
 ## Command routing
 
-For `git`, the shim makes a routing decision before contacting the broker. Git commands that do not require credential injection are passed directly to the real binary via `exec()` — the broker is never contacted and no policy check occurs. Every `gh` invocation contacts the broker so that `GH_TOKEN` can always be injected.
+For `ghbrk git`, a routing decision is made before contacting the broker. Git subcommands that do not require credential injection are rejected immediately with a guidance error — the broker is never contacted and no policy check occurs. Every `ghbrk gh` invocation contacts the broker so that `GH_TOKEN` can always be injected.
 
 ### git
 
@@ -259,13 +310,13 @@ For `git`, the shim makes a routing decision before contacting the broker. Git c
 | `fetch` | broker |
 | `pull` | broker |
 | `clone` (GitHub remote) | broker |
-| `status`, `add`, `commit`, `log`, `diff`, `checkout`, and everything else | real `git` binary |
+| `status`, `add`, `commit`, `log`, `diff`, `checkout`, and everything else | guidance error (use plain `git`) |
 
-The classification is based on the first non-flag argument (global flags such as `-c`, `-C`, `--git-dir`, and `--work-tree` are skipped). An invocation with no subcommand is passed through.
+The classification is based on the first non-flag argument (global flags such as `-c`, `-C`, `--git-dir`, and `--work-tree` are skipped). An invocation with no subcommand returns a guidance error.
 
 ### gh
 
-Every `gh` invocation is routed to the broker so that `GH_TOKEN` is always injected from the stored credential. The broker classifies the request:
+Every `ghbrk gh` invocation is relayed to the broker so that `GH_TOKEN` is always injected from the stored credential. The broker classifies the request:
 
 | Group + action | Broker path |
 |----------------|-------------|
@@ -283,27 +334,27 @@ The classification is based on the first two positional arguments. Non-policy-ga
 
 | Operation | Triggered by | Branch-aware |
 |-----------|-------------|:------------:|
-| `push` | `git push` | yes |
-| `fetch` | `git fetch` | no |
-| `pull` | `git pull` | no |
-| `clone` | `git clone` | no |
-| `pr_open` | `gh pr create` | no |
-| `pr_comment` | `gh pr comment` | no |
-| `pr_close` | `gh pr close` | no |
-| `pr_merge` | `gh pr merge` | no |
-| `pr_review` | `gh pr review` | no |
-| `issue_open` | `gh issue create` | no |
-| `issue_comment` | `gh issue comment` | no |
-| `issue_close` | `gh issue close` | no |
-| `release_create` | `gh release create` | no |
-| `gh_api_read` | `gh api <path>` (GET) | no |
+| `push` | `ghbrk git push` | yes |
+| `fetch` | `ghbrk git fetch` | no |
+| `pull` | `ghbrk git pull` | no |
+| `clone` | `ghbrk git clone` | no |
+| `pr_open` | `ghbrk gh pr create` | no |
+| `pr_comment` | `ghbrk gh pr comment` | no |
+| `pr_close` | `ghbrk gh pr close` | no |
+| `pr_merge` | `ghbrk gh pr merge` | no |
+| `pr_review` | `ghbrk gh pr review` | no |
+| `issue_open` | `ghbrk gh issue create` | no |
+| `issue_comment` | `ghbrk gh issue comment` | no |
+| `issue_close` | `ghbrk gh issue close` | no |
+| `release_create` | `ghbrk gh release create` | no |
+| `gh_api_read` | `ghbrk gh api <path>` (GET) | no |
 
 Only `push` evaluates the `branches` field. For all other operations the branch field in a rule is ignored.
 
 **Repo resolution:**
 
-- `git` commands: The shim reads the origin remote URL from `.git/config` in the invoking user's context and forwards it to the broker; this works even when the user's home directory is not accessible to the broker process.
-- `gh` commands: uses the `-R`/`--repo` flag if present; otherwise falls back to the git repo context of the working directory.
+- `ghbrk git` commands: The client reads the origin remote URL from `.git/config` in the invoking user's context and forwards it to the broker; this works even when the user's home directory is not accessible to the broker process.
+- `ghbrk gh` commands: uses the `-R`/`--repo` flag if present; otherwise falls back to the git repo context of the working directory.
 - Supported remote URL formats: `git@github.com:org/repo`, `ssh://git@github.com/org/repo`, `https://github.com/org/repo` (with or without `.git` suffix).
 - Non-GitHub hosts (GitLab, Bitbucket, etc.) are rejected.
 
@@ -330,12 +381,12 @@ These can be set in the systemd unit's `[Service]` block or in the agent's envir
 
 | Variable | Default | Scope | Description |
 |----------|---------|-------|-------------|
-| `GHBRK_SOCKET` | `/var/run/ghbrk/broker.sock` | daemon + shim | Unix socket path |
+| `GHBRK_SOCKET` | `/var/run/ghbrk/broker.sock` | daemon + client | Unix socket path |
 | `GHBRK_POLICY` | `/etc/ghbrk/policy.yaml` | daemon only | Policy file path |
 | `GHBRK_AUDIT_LOG` | `/var/log/ghbrk/audit.log` | daemon only | Audit log path |
 | `RUST_LOG` | `info` | daemon only | Log verbosity (`debug`, `trace` for troubleshooting) |
 
-To override the socket in both the daemon and shim, set `GHBRK_SOCKET` consistently in both environments.
+To override the socket in both the daemon and client, set `GHBRK_SOCKET` consistently in both environments.
 
 ## Building from source
 

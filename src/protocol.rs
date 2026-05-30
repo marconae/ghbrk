@@ -15,6 +15,8 @@ pub enum Tool {
     Git,
     Gh,
     Check,
+    Explain,
+    Policy,
 }
 
 /// Request frame sent by the shim to the broker.
@@ -138,6 +140,38 @@ mod tests {
         assert_eq!(decoded, req);
         let json = serde_json::to_string(&Tool::Check).unwrap();
         assert_eq!(json, r#""check""#);
+    }
+
+    #[tokio::test]
+    async fn explain_request_round_trips() {
+        let req = Request {
+            tool: Tool::Explain,
+            args: vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+            cwd: PathBuf::from("/work/repo"),
+            remote_url: None,
+            head_branch: None,
+        };
+        let decoded: Request = round_trip(&req).await;
+        assert_eq!(decoded, req);
+        assert_eq!(decoded.tool, Tool::Explain);
+        let json = serde_json::to_string(&Tool::Explain).unwrap();
+        assert_eq!(json, r#""explain""#);
+    }
+
+    #[tokio::test]
+    async fn policy_request_round_trips() {
+        let req = Request {
+            tool: Tool::Policy,
+            args: vec!["acme/web".into()],
+            cwd: PathBuf::from("/work/repo"),
+            remote_url: None,
+            head_branch: None,
+        };
+        let decoded: Request = round_trip(&req).await;
+        assert_eq!(decoded, req);
+        assert_eq!(decoded.tool, Tool::Policy);
+        let json = serde_json::to_string(&Tool::Policy).unwrap();
+        assert_eq!(json, r#""policy""#);
     }
 
     #[tokio::test]

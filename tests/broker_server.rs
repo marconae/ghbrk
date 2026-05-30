@@ -27,6 +27,7 @@ fn dummy_policy() -> Policy {
 struct Harness {
     _tmp: TempDir,
     socket_path: PathBuf,
+    audit_path: PathBuf,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -36,13 +37,17 @@ impl Harness {
     }
 
     async fn start_with_creds(credentials_root: Option<PathBuf>) -> Self {
+        Self::start_with(dummy_policy(), credentials_root).await
+    }
+
+    async fn start_with(policy: Policy, credentials_root: Option<PathBuf>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let socket_path = tmp.path().join("broker.sock");
         let audit_path = tmp.path().join("audit.log");
         let logger = Arc::new(AuditLogger::new(&audit_path).unwrap());
         let config = BrokerConfig {
             socket_path: socket_path.clone(),
-            policy: dummy_policy(),
+            policy,
             audit_logger: logger,
             credentials_root,
         };
@@ -63,7 +68,25 @@ impl Harness {
         Self {
             _tmp: tmp,
             socket_path,
+            audit_path,
             handle,
+        }
+    }
+}
+
+/// Read all `ServerFrame`s from `stream` until an `Exit` frame is seen,
+/// concatenating any `StdoutChunk` payloads into a single string. Returns the
+/// stdout text and the exit code.
+async fn collect_until_exit(stream: &mut UnixStream) -> (String, i32) {
+    let mut out = Vec::new();
+    loop {
+        let frame: ServerFrame = read_frame(stream).await.expect("frame");
+        match frame {
+            ServerFrame::StdoutChunk { data } => out.extend_from_slice(&data),
+            ServerFrame::Exit { code } => {
+                return (String::from_utf8_lossy(&out).into_owned(), code);
+            }
+            other => panic!("unexpected frame before Exit: {other:?}"),
         }
     }
 }
@@ -321,4 +344,140 @@ fn daemon_shuts_down_on_sigterm() {
     assert!(!socket.exists(), "socket file was not removed on shutdown");
     // Audit file should still be on disk; flush ran before exit.
     assert!(audit.exists(), "audit file missing after shutdown");
+}
+
+#[tokio::test]
+async fn explain_local_git_reports_out_of_scope() {
+    let h = Harness::start().await;
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Explain,
+        args: vec!["git".into(), "status".into()],
+        cwd: PathBuf::from("/work/repo"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let (text, code) = collect_until_exit(&mut stream).await;
+    assert_eq!(code, 0, "explain of a local subcommand exits 0");
+    assert!(text.contains("local"), "expected 'local' in:\n{text}");
+    assert!(
+        text.contains("ghbrk only brokers"),
+        "expected guidance in:\n{text}"
+    );
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn explain_remote_git_reports_policy_and_inject() {
+    let policy = Policy::from_yaml(
+        "rules:\n  - user: \"*\"\n    org: \"*\"\n    repo: \"*\"\n    operations: [push]\n    branches: [\"*\"]\n    effect: allow\n",
+    )
+    .unwrap();
+    let h = Harness::start_with(policy, None).await;
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Explain,
+        args: vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+        cwd: PathBuf::from("/work/repo"),
+        remote_url: Some("git@github.com:acme/web.git".into()),
+        head_branch: Some("main".into()),
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let (text, code) = collect_until_exit(&mut stream).await;
+    assert_eq!(code, 0);
+    assert!(text.contains("acme/web"), "expected repo in:\n{text}");
+    assert!(text.contains("push"), "expected operation in:\n{text}");
+    assert!(text.contains("allow"), "expected allow in:\n{text}");
+    assert!(
+        text.contains("SSH credential"),
+        "expected SSH inject in:\n{text}"
+    );
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn policy_lists_allowed_and_forbidden() {
+    let policy = Policy::from_yaml(
+        "rules:\n  - user: \"*\"\n    org: acme\n    repo: web\n    operations: [push, pr_open]\n    branches: [\"*\"]\n    effect: allow\n",
+    )
+    .unwrap();
+    let h = Harness::start_with(policy, None).await;
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Policy,
+        args: vec!["acme/web".into()],
+        cwd: PathBuf::from("/work/repo"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let (text, code) = collect_until_exit(&mut stream).await;
+    assert_eq!(code, 0);
+    assert!(text.contains("acme/web"), "expected repo header:\n{text}");
+    assert!(
+        text.contains("allowed operations:"),
+        "expected allowed group:\n{text}"
+    );
+    assert!(
+        text.contains("forbidden operations"),
+        "expected forbidden group:\n{text}"
+    );
+    assert!(text.contains("push"), "push should be allowed:\n{text}");
+    assert!(
+        text.contains("pr_open"),
+        "pr_open should be allowed:\n{text}"
+    );
+    assert!(text.contains("fetch"), "fetch should be forbidden:\n{text}");
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn policy_rejects_malformed_repo_specifier() {
+    let h = Harness::start().await;
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Policy,
+        args: vec!["not-a-repo".into()],
+        cwd: PathBuf::from("/work/repo"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let (text, code) = collect_until_exit(&mut stream).await;
+    assert_eq!(code, 1);
+    assert!(text.contains("invalid repo specifier"), "got:\n{text}");
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn broker_denies_local_git_subcommand() {
+    let h = Harness::start().await;
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Git,
+        args: vec!["status".into()],
+        cwd: PathBuf::from("/work/repo"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let frame: ServerFrame = read_frame(&mut stream).await.unwrap();
+    let reason = match frame {
+        ServerFrame::Denied { reason } => reason,
+        other => panic!("expected Denied, got {other:?}"),
+    };
+    assert!(
+        reason.contains("local git operations must be run directly"),
+        "got reason: {reason}"
+    );
+
+    // The broker must record a deny entry in the audit log.
+    h.handle.abort();
+    let _ = h.handle.await;
+    let log = std::fs::read_to_string(&h.audit_path).expect("audit log readable");
+    assert!(
+        log.contains("\"decision\":\"deny\"") && log.contains("status"),
+        "expected a deny entry mentioning the subcommand, got:\n{log}"
+    );
 }

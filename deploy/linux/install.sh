@@ -9,8 +9,6 @@ TMPFILES_SRC="$(dirname "$0")/ghbrk.tmpfiles"
 TMPFILES_DST="/etc/tmpfiles.d/ghbrk.conf"
 POLICY_SRC="$(dirname "$0")/../../config/policy.example.yaml"
 POLICY_DST="/etc/ghbrk/policy.yaml"
-CONFIG_SRC="$(dirname "$0")/../../config/config.example.yaml"
-CONFIG_DST="/etc/ghbrk/config.yaml"
 
 # ---------------------------------------------------------------------------
 # 1. Create system user ghbrk (idempotent)
@@ -50,19 +48,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3b. Create /usr/local/bin/git and /usr/local/bin/gh symlinks (idempotent)
-# ---------------------------------------------------------------------------
-for LINK_NAME in git gh; do
-    LINK_PATH="/usr/local/bin/$LINK_NAME"
-    if [ -e "$LINK_PATH" ] && [ ! -L "$LINK_PATH" ]; then
-        echo "WARNING: $LINK_PATH exists and is not a symlink; refusing to overwrite"
-        continue
-    fi
-    ln -sfn "$BINARY_DST" "$LINK_PATH"
-    echo "Linked $LINK_PATH -> $BINARY_DST"
-done
-
-# ---------------------------------------------------------------------------
 # 4. Create directories with correct ownership and modes
 # ---------------------------------------------------------------------------
 install -d -m 0755 /etc/ghbrk
@@ -77,16 +62,6 @@ if [ ! -f "$POLICY_DST" ]; then
     echo "Installed example policy to $POLICY_DST"
 else
     echo "Policy file $POLICY_DST already exists, skipping."
-fi
-
-# ---------------------------------------------------------------------------
-# 6. Install example shim config (no overwrite if already present)
-# ---------------------------------------------------------------------------
-if [ ! -f "$CONFIG_DST" ]; then
-    install -m 0644 -o root -g root "$CONFIG_SRC" "$CONFIG_DST"
-    echo "Installed example config to $CONFIG_DST"
-else
-    echo "Config file $CONFIG_DST already exists, skipping."
 fi
 
 # ---------------------------------------------------------------------------

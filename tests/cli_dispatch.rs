@@ -1,4 +1,3 @@
-use std::os::unix::fs::symlink;
 use std::process::Command;
 
 fn bin() -> &'static str {
@@ -6,7 +5,7 @@ fn bin() -> &'static str {
 }
 
 #[test]
-fn help_flag_lists_subcommands() {
+fn help_lists_gateway_subcommands() {
     let out = Command::new(bin())
         .arg("--help")
         .output()
@@ -14,8 +13,15 @@ fn help_flag_lists_subcommands() {
     assert!(out.status.success(), "exit: {:?}", out.status.code());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("daemon"), "stdout: {stdout}");
+    assert!(stdout.contains("doctor"), "stdout: {stdout}");
+    assert!(stdout.contains("explain"), "stdout: {stdout}");
+    assert!(stdout.contains("policy"), "stdout: {stdout}");
     assert!(stdout.contains("git"), "stdout: {stdout}");
     assert!(stdout.contains("gh"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("check"),
+        "stdout must not contain 'check': {stdout}"
+    );
 }
 
 #[test]
@@ -51,7 +57,9 @@ fn missing_socket_path(tmp: &tempfile::TempDir) -> String {
 }
 
 #[test]
-fn ghbrk_git_subcommand_enters_shim() {
+fn git_push_relays_to_broker() {
+    // ghbrk git push is a remote operation; with a missing broker socket it
+    // must fail with exit code 1 and stderr mentioning the broker.
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = missing_socket_path(&tmp);
     let out = Command::new(bin())
@@ -72,7 +80,9 @@ fn ghbrk_git_subcommand_enters_shim() {
 }
 
 #[test]
-fn ghbrk_gh_subcommand_enters_shim() {
+fn gh_relays_to_broker() {
+    // ghbrk gh relays all invocations to broker; with a missing broker it must
+    // fail with exit code 1 and stderr mentioning the broker.
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = missing_socket_path(&tmp);
     let out = Command::new(bin())
@@ -93,48 +103,111 @@ fn ghbrk_gh_subcommand_enters_shim() {
 }
 
 #[test]
-fn argv0_git_symlink_enters_shim() {
+fn git_status_returns_guidance_error() {
+    // Local-only git subcommands must be rejected before any broker connection.
+    // This test completes without any socket timeout.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let link = tmp.path().join("git");
-    symlink(bin(), &link).expect("symlink");
     let socket = missing_socket_path(&tmp);
-    let out = Command::new(&link)
-        .args(["push", "origin", "main"])
+    let out = Command::new(bin())
+        .args(["git", "status"])
         .env("GHBRK_SOCKET", &socket)
         .output()
-        .expect("failed to run git symlink push");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+        .expect("failed to run ghbrk git status");
     assert!(
         !out.status.success(),
-        "expected non-zero exit when broker is missing"
+        "expected non-zero exit for local subcommand"
     );
-    assert_eq!(out.status.code(), Some(1), "expected exit code 1");
+    assert_eq!(out.status.code(), Some(2), "expected exit code 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("ghbrk:") && stderr.contains("broker"),
-        "stderr: {stderr}"
+        stderr.contains("directly") || stderr.contains("ghbrk git only brokers"),
+        "expected guidance message in stderr: {stderr}"
     );
 }
 
 #[test]
-fn argv0_gh_symlink_enters_shim() {
+fn git_no_subcommand_returns_guidance_error() {
+    // No subcommand at all is also a local-only (non-remote) case.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let link = tmp.path().join("gh");
-    symlink(bin(), &link).expect("symlink");
     let socket = missing_socket_path(&tmp);
-    let out = Command::new(&link)
-        .args(["pr", "create"])
+    let out = Command::new(bin())
+        .arg("git")
         .env("GHBRK_SOCKET", &socket)
         .output()
-        .expect("failed to run gh symlink pr create");
+        .expect("failed to run ghbrk git");
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for ghbrk git with no subcommand"
+    );
+    assert_eq!(out.status.code(), Some(2), "expected exit code 2");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("directly") || stderr.contains("ghbrk git only brokers"),
+        "expected guidance message in stderr: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_subcommand_dispatches() {
+    // doctor should report daemon unreachable and exit non-zero when no broker
+    // is listening.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = missing_socket_path(&tmp);
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("GHBRK_SOCKET", &socket)
+        .output()
+        .expect("failed to run ghbrk doctor");
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when daemon is missing"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("UNREACHABLE"),
+        "expected UNREACHABLE in stdout: {stdout}"
+    );
+}
+
+#[test]
+fn explain_subcommand_dispatches() {
+    // explain relays to broker; with a missing broker it fails with a
+    // connection error (non-zero exit).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = missing_socket_path(&tmp);
+    let out = Command::new(bin())
+        .args(["explain", "git", "status"])
+        .env("GHBRK_SOCKET", &socket)
+        .output()
+        .expect("failed to run ghbrk explain git status");
+    assert!(
+        out.status.code().is_some(),
+        "process killed by signal unexpectedly"
+    );
     assert!(
         !out.status.success(),
         "expected non-zero exit when broker is missing"
     );
-    assert_eq!(out.status.code(), Some(1), "expected exit code 1");
+}
+
+#[test]
+fn policy_subcommand_dispatches() {
+    // policy relays to broker; with a missing broker it fails.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = missing_socket_path(&tmp);
+    let out = Command::new(bin())
+        .args(["policy", "acme/web"])
+        .env("GHBRK_SOCKET", &socket)
+        .output()
+        .expect("failed to run ghbrk policy acme/web");
     assert!(
-        stderr.contains("ghbrk:") && stderr.contains("broker"),
-        "stderr: {stderr}"
+        !out.status.success(),
+        "expected non-zero exit when broker is missing"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ghbrk:") || stderr.contains("broker") || stderr.contains("connect"),
+        "expected broker connection error in stderr: {stderr}"
     );
 }
 

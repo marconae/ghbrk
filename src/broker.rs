@@ -256,6 +256,14 @@ async fn process_request(
     audit: &Arc<AuditLogger>,
     credentials_root: Option<&Path>,
 ) -> Result<(), ConnectionError> {
+    // Query tools resolve + evaluate policy without executing anything.
+    if request.tool == Tool::Explain {
+        return handle_explain_request(stream, &request, username, policy).await;
+    }
+    if request.tool == Tool::Policy {
+        return handle_policy_request(stream, &request, username, policy).await;
+    }
+
     // Short-circuit for Tool::Check — runs health checks as the broker user.
     // No resolver, no policy evaluation, no audit record.
     if request.tool == Tool::Check {
@@ -265,14 +273,42 @@ async fn process_request(
     // `gh` passthrough invocations (anything that is not a broker-op, e.g.
     // `gh repo view`, `gh auth status`) bypass resolve and policy but still
     // receive `GH_TOKEN` injection so the wrapped `gh` is authenticated.
-    if request.tool == Tool::Gh && !crate::passthrough::gh_is_broker_op(&request.args) {
+    if request.tool == Tool::Gh && !gh_is_broker_op(&request.args) {
         return handle_gh_passthrough(stream, &request, username, audit, credentials_root).await;
+    }
+
+    // Defence-in-depth: the `ghbrk git` gateway already filters local-only
+    // subcommands client-side, but a hand-crafted client could still submit
+    // one. Reject it here before any resolve or execution.
+    if request.tool == Tool::Git && !git_is_remote_op(&request.args) {
+        let reason = "local git operations must be run directly, not through ghbrk";
+        write_audit(
+            audit,
+            AuditEntry {
+                user: username,
+                tool: "git",
+                args: &request.args,
+                org: "",
+                repo: "",
+                branch: None,
+                operation: "local",
+                decision: AuditDecision::Deny {
+                    reason: reason.to_string(),
+                },
+            },
+        )
+        .await;
+        send_denied(stream, reason).await?;
+        return Ok(());
     }
 
     let tool_name = match request.tool {
         Tool::Git => "git",
         Tool::Gh => "gh",
         Tool::Check => unreachable!("Tool::Check is handled before resolve_request"),
+        Tool::Explain | Tool::Policy => {
+            unreachable!("query tools are handled before resolve_request")
+        }
     };
 
     // Resolve the request to (org, repo, branch, operation).
@@ -384,6 +420,30 @@ async fn process_request(
     Ok(())
 }
 
+/// Returns `true` when a `gh` invocation is a broker-mediated operation
+/// (subject to resolve + policy). When `false`, the broker treats it as a
+/// passthrough: it still injects `GH_TOKEN` but bypasses resolve and policy.
+fn gh_is_broker_op(args: &[String]) -> bool {
+    let mut positional = args.iter().filter(|a| !a.starts_with('-'));
+    let group = positional.next().map(String::as_str).unwrap_or("");
+    let action = positional.next().map(String::as_str).unwrap_or("");
+    if group == "api" {
+        return true;
+    }
+    matches!(
+        (group, action),
+        ("pr", "create")
+            | ("pr", "comment")
+            | ("pr", "merge")
+            | ("pr", "close")
+            | ("pr", "review")
+            | ("issue", "create")
+            | ("issue", "comment")
+            | ("issue", "close")
+            | ("release", "create")
+    )
+}
+
 async fn handle_gh_passthrough(
     stream: &mut UnixStream,
     request: &Request,
@@ -452,6 +512,277 @@ async fn handle_check_request(
     Ok(())
 }
 
+/// Every operation in the policy vocabulary, used by [`handle_policy_request`]
+/// to report the caller's full allow/deny surface against a repo.
+const ALL_OPS: &[Operation] = &[
+    Operation::Push,
+    Operation::Fetch,
+    Operation::Pull,
+    Operation::Clone,
+    Operation::PrOpen,
+    Operation::PrComment,
+    Operation::PrClose,
+    Operation::PrMerge,
+    Operation::PrReview,
+    Operation::IssueOpen,
+    Operation::IssueComment,
+    Operation::IssueClose,
+    Operation::ReleaseCreate,
+    Operation::GhApiRead {
+        path: String::new(),
+    },
+];
+
+/// A git invocation leaves the machine only for `push`, `fetch`, `clone`, and
+/// `pull`. Everything else (including an empty argv) is local-only. Mirrors the
+/// client-side gateway filter in `cmd/git.rs`.
+fn git_is_remote_op(args: &[String]) -> bool {
+    matches!(
+        git_first_subcommand(args),
+        Some("push" | "fetch" | "clone" | "pull")
+    )
+}
+
+/// First non-flag positional argument, skipping git global flags that take a
+/// value (`-c`, `-C`, `--config`, `--git-dir`, `--work-tree`, `--namespace`).
+fn git_first_subcommand(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if !arg.starts_with('-') {
+            return Some(arg.as_str());
+        }
+        if matches!(
+            arg.as_str(),
+            "-c" | "-C" | "--config" | "--git-dir" | "--work-tree" | "--namespace"
+        ) {
+            iter.next();
+        }
+    }
+    None
+}
+
+/// Resolve + evaluate a request without executing it, streaming a human
+/// readable explanation back to the client. Never spawns a subprocess.
+async fn handle_explain_request(
+    stream: &mut UnixStream,
+    request: &Request,
+    username: &str,
+    policy: &Policy,
+) -> Result<(), ConnectionError> {
+    let tool = request.args.first().map(String::as_str).unwrap_or("");
+    match tool {
+        "" => {
+            stream_text(stream, "explain: no command provided\n").await?;
+            return finish_explain(stream, 1).await;
+        }
+        "git" => {
+            let sub = &request.args[1..];
+            if !git_is_remote_op(sub) {
+                let subcmd = git_first_subcommand(sub).unwrap_or("");
+                stream_text(stream, &explain_local_git(subcmd)).await?;
+                return finish_explain(stream, 0).await;
+            }
+            explain_resolved(stream, request, username, policy, Tool::Git, "git").await
+        }
+        "gh" => explain_resolved(stream, request, username, policy, Tool::Gh, "gh").await,
+        other => {
+            stream_text(
+                stream,
+                &format!("explain: unknown tool '{other}'; expected 'git' or 'gh'\n"),
+            )
+            .await?;
+            finish_explain(stream, 1).await
+        }
+    }
+}
+
+/// Resolve `request.args[1..]` for the named tool, evaluate policy, and stream
+/// the resolved-and-evaluated report. On resolver error, streams the error and
+/// exits with code 1.
+async fn explain_resolved(
+    stream: &mut UnixStream,
+    request: &Request,
+    username: &str,
+    policy: &Policy,
+    tool: Tool,
+    tool_name: &str,
+) -> Result<(), ConnectionError> {
+    let sub = &request.args[1..];
+    let resolved = match resolve_for_tool(
+        tool,
+        sub,
+        &request.cwd,
+        request.remote_url.as_deref(),
+        request.head_branch.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            stream_text(stream, &format!("explain: resolver error: {err}\n")).await?;
+            return finish_explain(stream, 1).await;
+        }
+    };
+
+    let policy_req = PolicyRequest {
+        user: username,
+        org: &resolved.org,
+        repo: &resolved.repo,
+        operation: resolved.operation.clone(),
+        branch: resolved.branch.as_deref(),
+    };
+    let decision = policy.evaluate(&policy_req);
+    let report = explain_report(tool, tool_name, sub, &resolved, &decision);
+    stream_text(stream, &report).await?;
+    finish_explain(stream, 0).await
+}
+
+fn resolve_for_tool(
+    tool: Tool,
+    args: &[String],
+    cwd: &Path,
+    url_hint: Option<&str>,
+    branch_hint: Option<&str>,
+) -> Result<ResolvedRequest, ResolverError> {
+    match tool {
+        Tool::Git => resolve_git(args, cwd, url_hint, branch_hint),
+        Tool::Gh => resolve_gh(args, cwd, url_hint, branch_hint),
+        _ => unreachable!("resolve_for_tool only handles Git and Gh"),
+    }
+}
+
+fn explain_local_git(subcmd: &str) -> String {
+    format!(
+        "tool:      git {subcmd}\n\
+         scope:     local — outside ghbrk's gateway\n\
+         guidance:  run 'git {subcmd}' directly; ghbrk only brokers remote git operations (push, fetch, clone, pull)\n\
+         policy:    N/A (not evaluated)\n\
+         inject:    none\n"
+    )
+}
+
+fn explain_report(
+    tool: Tool,
+    tool_name: &str,
+    sub: &[String],
+    resolved: &ResolvedRequest,
+    decision: &Decision,
+) -> String {
+    let subcmd = sub.first().map(String::as_str).unwrap_or("");
+    let op = operation_name(&resolved.operation);
+    let repo = format!("{}/{}", resolved.org, resolved.repo);
+    let branch = resolved.branch.as_deref().unwrap_or("N/A");
+    let (policy_line, inject) = match decision {
+        Decision::Allow => ("allow".to_string(), inject_label(tool, resolved.url_scheme)),
+        Decision::Deny { reason } => (format!("deny: {reason}"), "none"),
+    };
+    format!(
+        "tool:      {tool_name} {subcmd}\n\
+         operation: {op}\n\
+         repo:      {repo}\n\
+         branch:    {branch}\n\
+         policy:    {policy_line}\n\
+         inject:    {inject}\n"
+    )
+}
+
+fn inject_label(tool: Tool, scheme: UrlScheme) -> &'static str {
+    match tool {
+        Tool::Gh => "GitHub token (GH_TOKEN)",
+        Tool::Git => match scheme {
+            UrlScheme::Ssh => "SSH credential",
+            UrlScheme::Https => "HTTPS credential (GIT_ASKPASS)",
+        },
+        _ => "none",
+    }
+}
+
+/// Evaluate every operation in the vocabulary for the caller against the
+/// requested repo and stream a grouped allowed/forbidden report. Never spawns
+/// a subprocess.
+async fn handle_policy_request(
+    stream: &mut UnixStream,
+    request: &Request,
+    username: &str,
+    policy: &Policy,
+) -> Result<(), ConnectionError> {
+    let spec = request.args.first().map(String::as_str).unwrap_or("");
+    let (org, repo) = match parse_repo_spec(spec) {
+        Some(pair) => pair,
+        None => {
+            stream_text(
+                stream,
+                &format!("policy: invalid repo specifier '{spec}'; expected org/repo\n"),
+            )
+            .await?;
+            return finish_explain(stream, 1).await;
+        }
+    };
+
+    let mut allowed: Vec<&str> = Vec::new();
+    let mut forbidden: Vec<&str> = Vec::new();
+    for op in ALL_OPS {
+        let req = PolicyRequest {
+            user: username,
+            org: &org,
+            repo: &repo,
+            operation: op.clone(),
+            branch: None,
+        };
+        match policy.evaluate(&req) {
+            Decision::Allow => allowed.push(operation_name(op)),
+            Decision::Deny { .. } => forbidden.push(operation_name(op)),
+        }
+    }
+
+    let report = policy_report(&org, &repo, &allowed, &forbidden);
+    stream_text(stream, &report).await?;
+    finish_explain(stream, 0).await
+}
+
+fn parse_repo_spec(spec: &str) -> Option<(String, String)> {
+    let (org, repo) = spec.split_once('/')?;
+    if org.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((org.to_string(), repo.to_string()))
+}
+
+fn policy_report(org: &str, repo: &str, allowed: &[&str], forbidden: &[&str]) -> String {
+    let mut out = format!("repo: {org}/{repo}\n\nallowed operations:\n");
+    if allowed.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for op in allowed {
+            out.push_str(&format!("  {op}\n"));
+        }
+    }
+    out.push_str("\nforbidden operations (default-deny):\n");
+    if forbidden.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for op in forbidden {
+            out.push_str(&format!("  {op}\n"));
+        }
+    }
+    out
+}
+
+async fn stream_text(stream: &mut UnixStream, text: &str) -> Result<(), ConnectionError> {
+    write_frame(
+        stream,
+        &ServerFrame::StdoutChunk {
+            data: text.as_bytes().to_vec(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn finish_explain(stream: &mut UnixStream, code: i32) -> Result<(), ConnectionError> {
+    write_frame(stream, &ServerFrame::Exit { code }).await?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
 fn resolve_request(request: &Request) -> Result<ResolvedRequest, ResolverError> {
     match request.tool {
         Tool::Git => resolve_git(
@@ -467,6 +798,9 @@ fn resolve_request(request: &Request) -> Result<ResolvedRequest, ResolverError> 
             request.head_branch.as_deref(),
         ),
         Tool::Check => unreachable!("Tool::Check is handled before resolve_request"),
+        Tool::Explain | Tool::Policy => {
+            unreachable!("query tools are handled before resolve_request")
+        }
     }
 }
 
@@ -504,6 +838,7 @@ fn build_env(
             }
         },
         Tool::Check => unreachable!("Tool::Check is handled before build_env"),
+        Tool::Explain | Tool::Policy => unreachable!("query tools are handled before build_env"),
     }
 }
 
@@ -598,6 +933,41 @@ mod tests {
             return;
         }
         assert!(username_for_uid(candidate).is_none());
+    }
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn gh_api_is_broker_op() {
+        assert!(gh_is_broker_op(&s(&["api", "user"])));
+    }
+
+    #[test]
+    fn gh_write_ops_are_broker_ops() {
+        assert!(gh_is_broker_op(&s(&["pr", "create", "--title", "x"])));
+        assert!(gh_is_broker_op(&s(&[
+            "pr", "comment", "42", "--body", "hi"
+        ])));
+        assert!(gh_is_broker_op(&s(&["pr", "merge", "42"])));
+        assert!(gh_is_broker_op(&s(&["pr", "close", "42"])));
+        assert!(gh_is_broker_op(&s(&["pr", "review", "42", "--approve"])));
+        assert!(gh_is_broker_op(&s(&["issue", "create", "--title", "bug"])));
+        assert!(gh_is_broker_op(&s(&[
+            "issue", "comment", "1", "--body", "x"
+        ])));
+        assert!(gh_is_broker_op(&s(&["issue", "close", "1"])));
+        assert!(gh_is_broker_op(&s(&["release", "create", "v1.0.0"])));
+    }
+
+    #[test]
+    fn gh_read_ops_are_passthrough() {
+        assert!(!gh_is_broker_op(&s(&["auth", "status"])));
+        assert!(!gh_is_broker_op(&s(&["repo", "view"])));
+        assert!(!gh_is_broker_op(&s(&["pr", "list"])));
+        assert!(!gh_is_broker_op(&s(&["pr", "frobnicate"])));
+        assert!(!gh_is_broker_op(&s(&[])));
     }
 
     #[test]

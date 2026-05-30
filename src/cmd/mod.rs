@@ -1,5 +1,7 @@
-pub mod check;
 pub mod daemon;
+pub mod doctor;
+pub mod explain;
+pub mod gateway;
 pub mod gh;
 pub mod git;
-pub mod shim;
+pub mod policy;

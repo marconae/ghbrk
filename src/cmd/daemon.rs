@@ -8,7 +8,8 @@ use std::sync::Arc;
 use ghbrk::audit::{AuditLogger, DEFAULT_AUDIT_PATH};
 use ghbrk::broker::{run_broker, BrokerConfig};
 use ghbrk::policy::Policy;
-use ghbrk::shim::DEFAULT_SOCKET_PATH;
+
+use super::gateway::DEFAULT_SOCKET_PATH;
 
 /// Default policy file location.
 pub const DEFAULT_POLICY_PATH: &str = "/etc/ghbrk/policy.yaml";

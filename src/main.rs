@@ -1,7 +1,5 @@
 mod cmd;
 
-use std::ffi::OsStr;
-use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -15,17 +13,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Check credentials and GitHub API reachability
-    Check,
     /// Run the broker daemon
     Daemon,
-    /// Invoke git through the broker (shim mode)
+    /// Diagnose the ghbrk environment (daemon, credentials, policy)
+    Doctor,
+    /// Explain how the broker would resolve and evaluate a command without running it
+    Explain {
+        /// Command tokens to explain (e.g. `git push origin main`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Show the allowed and forbidden operations for a repository
+    Policy {
+        /// Repository in `org/repo` form
+        repo: String,
+    },
+    /// Relay a remote git operation through the broker
     Git {
         /// Arguments forwarded to git
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Invoke gh through the broker (shim mode)
+    /// Relay a gh invocation through the broker
     Gh {
         /// Arguments forwarded to gh
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -37,31 +46,13 @@ fn main() -> ExitCode {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
-    let mut all_args: Vec<String> = std::env::args().collect();
-
-    let argv0 = std::env::args_os().next().unwrap_or_default();
-    let basename = Path::new(&argv0)
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("");
-
-    match basename {
-        "git" => {
-            let forwarded: Vec<String> = all_args.drain(1..).collect();
-            cmd::git::run(&forwarded)
-        }
-        "gh" => {
-            let forwarded: Vec<String> = all_args.drain(1..).collect();
-            cmd::gh::run(&forwarded)
-        }
-        _ => {
-            let cli = Cli::parse();
-            match cli.command {
-                Commands::Check => cmd::check::run(),
-                Commands::Daemon => cmd::daemon::run(),
-                Commands::Git { args } => cmd::git::run(&args),
-                Commands::Gh { args } => cmd::gh::run(&args),
-            }
-        }
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Daemon => cmd::daemon::run(),
+        Commands::Doctor => cmd::doctor::run(),
+        Commands::Explain { args } => cmd::explain::run(&args),
+        Commands::Policy { repo } => cmd::policy::run(&repo),
+        Commands::Git { args } => cmd::git::run(&args),
+        Commands::Gh { args } => cmd::gh::run(&args),
     }
 }
