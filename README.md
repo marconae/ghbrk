@@ -120,11 +120,12 @@ The install script (idempotent; safe to re-run):
 1. Creates system user `ghbrk` (no login shell) and group `ghbrk-clients`
 2. Installs the binary to `/usr/local/bin/ghbrk` (no `git`/`gh` symlinks are created)
 3. Creates directories with strict permissions:
+   - `/etc/ghbrk/` — mode `0755`, owned by `root:root`
    - `/etc/ghbrk/credentials/` — mode `0700`, owned by `ghbrk`
    - `/run/ghbrk/` — mode `2750`, group `ghbrk-clients`; managed by `systemd-tmpfiles` at every boot via `/etc/tmpfiles.d/ghbrk.conf`
    - `/var/log/ghbrk/` — mode `0750`, group `ghbrk-clients`
 4. Writes a starter policy to `/etc/ghbrk/policy.yaml` if one does not exist
-5. Installs the systemd unit and `tmpfiles.d` snippet; enables and starts the service
+5. Installs the systemd unit and `tmpfiles.d` snippet; enables and restarts the service
 6. Adds `$SUDO_USER` to `ghbrk-clients` (effective at next login)
 
 Check the service and verify health:
