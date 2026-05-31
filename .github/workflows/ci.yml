@@ -68,13 +68,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Install Rust stable (with musl target)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # The harness builds a static musl binary to ship into the devenv
+          # container, which runs an older glibc than the host runner.
+          targets: x86_64-unknown-linux-musl
 
       # Shares the same cache key as the lint job — whichever finishes first
       # primes the cache for the other.
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@v2
+
+      # musl-tools provides the musl-gcc linker required to compile the static
+      # binary that the harness ships into the devenv Docker container.
+      - name: Install musl-tools
+        run: sudo apt-get install -y --no-install-recommends musl-tools
+
+      # The broker daemon's SSH agent code resolves the ghbrk-clients group by
+      # name (for socket chgrp). Create the group so DaemonHandle::start()
+      # succeeds in the harness tests.
+      - name: Create ghbrk-clients group
+        run: sudo groupadd --system ghbrk-clients
 
       # Fast path: lib unit tests with no system dependencies.
       - name: Unit tests (lib)
