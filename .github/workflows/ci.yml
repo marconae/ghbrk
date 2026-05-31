@@ -86,10 +86,15 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends musl-tools
 
       # The broker daemon's SSH agent code resolves the ghbrk-clients group by
-      # name (for socket chgrp). Create the group so DaemonHandle::start()
-      # succeeds in the harness tests.
-      - name: Create ghbrk-clients group
-        run: sudo groupadd --system ghbrk-clients
+      # name (for socket chgrp). Create the group and add the runner user to it.
+      # Tests must run under sg so that ghbrk-clients is the active effective
+      # group — without this, chgrp(temp_dir, ghbrk-clients) returns EPERM even
+      # after usermod, because usermod only updates /etc/group and does not
+      # refresh the current session's supplementary group list.
+      - name: Create ghbrk-clients group and add runner
+        run: |
+          sudo groupadd --system ghbrk-clients
+          sudo usermod -aG ghbrk-clients runner
 
       # Fast path: lib unit tests with no system dependencies.
       - name: Unit tests (lib)
@@ -101,6 +106,9 @@ jobs:
       #                          credential_injection, credential_escrow
       #   tests/integration/  — harness (declared as [[test]] name = "harness")
       #
+      # sg ghbrk-clients activates ghbrk-clients as the effective GID so that
+      # start_ssh_agent() can chgrp its temp dir without EPERM.
+      #
       # --test-threads=1 is required by the harness: all its sub-tests share
       # one Docker Compose project on a single host port (2222) and must not
       # run concurrently. The non-harness tests are cheap and tolerate serial
@@ -110,4 +118,4 @@ jobs:
       # runners. harness tests skip if Docker is absent — but ubuntu-latest
       # provides Docker Engine + compose plugin, so they run in full.
       - name: Integration tests (all suites, serial)
-        run: cargo test --tests -- --test-threads=1
+        run: sg ghbrk-clients -c 'cargo test --tests -- --test-threads=1'

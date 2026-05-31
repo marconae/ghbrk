@@ -1481,6 +1481,11 @@ fn e2e_privilege_drop_0700_home() {
     // directly (not through the broker) so we supply GIT_SSH_COMMAND explicitly;
     // the creds-dir copy of the key is used since the root-owned 0600 PRIV_KEY
     // is unreadable to priv-testuser.
+    //
+    // Use /usr/bin/git (not the PRIV_BIN_DIR wrapper) and the docker-internal
+    // URL directly. The wrapper overwrites GIT_SSH_COMMAND, dropping the -i
+    // flag and causing SSH to fall back to default identity lookup (which fails
+    // because priv-testuser has no ~/.ssh key).
     let clone = Command::new("docker")
         .args([
             "exec",
@@ -1489,15 +1494,13 @@ fn e2e_privilege_drop_0700_home() {
             "-e",
             &format!("HOME={PRIV_HOME}"),
             "-e",
-            &format!("PATH={PRIV_BIN_DIR}:/usr/bin:/bin"),
-            "-e",
             &format!(
                 "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {PRIV_CREDS_ROOT}/priv-testuser/id_rsa"
             ),
             DEVENV_CONTAINER,
-            "git",
+            "/usr/bin/git",
             "clone",
-            HARNESS_GIT_URL,
+            "ssh://git@git-server/home/git/repos/test.git",
             &format!("{PRIV_HOME}/testrepo"),
         ])
         .output()
