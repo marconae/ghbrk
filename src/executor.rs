@@ -124,10 +124,16 @@ where
 /// the child cannot end up with a mismatched identity.
 ///
 /// Ordering: the whole drop runs inside a single `pre_exec` hook, in the order
-/// `setgroups` → `setresgid` → `setresuid`. This ordering is mandatory — `setgroups`
-/// and `setresgid` require `CAP_SETGID`, which is lost the moment the real/saved
-/// UID is dropped to a non-zero value, so the supplementary-group and primary-
-/// group changes must complete *before* the UID drop.
+/// `setgroups` → `setresgid` → `setresuid` → `chdir`. This ordering is mandatory:
+///
+/// - `setgroups`/`setresgid` require `CAP_SETGID`, which is lost the moment the
+///   UID is dropped to a non-zero value, so they must come before `setresuid`.
+/// - `chdir` must come *after* `setresuid`: the standard library calls `chdir()`
+///   in the forked child **before** running `pre_exec` closures, which means the
+///   `Command::current_dir()` chdir runs as the daemon user and fails with EACCES
+///   on a 0700 home directory. We reset the command's working directory to `/`
+///   (always traversable) and perform the real `chdir` here, after the UID drop,
+///   so the kernel evaluates the path with the peer user's identity.
 ///
 /// We deliberately do **not** use `CommandExt::uid()`/`gid()`: the standard
 /// library applies those (and its own internal `setgroups`) *before* running
@@ -162,11 +168,19 @@ fn apply_privilege_drop(command: &mut Command, spec: &ChildSpec) {
         .copied()
         .map(nix::unistd::Gid::from_raw)
         .collect();
+
+    // Reset the command's cwd to "/" so the pre-pre_exec chdir (which runs as
+    // the daemon user) always succeeds. The real chdir to spec.cwd is done
+    // inside the pre_exec closure below, after setresuid.
+    let cwd = spec.cwd.clone();
+    command.current_dir("/");
+
     // SAFETY: the closure runs in the forked child between `fork` and `execve`,
     // where the Rust runtime is in an undefined state. It performs only the
-    // `setgroups`/`setresgid`/`setresuid` syscalls and returns; it touches no
-    // shared runtime state. The `gids` vector is pre-built before the closure
-    // (before `fork`), so no heap allocation occurs in the child, and no I/O.
+    // `setgroups`/`setresgid`/`setresuid`/`chdir` syscalls and returns; it
+    // touches no shared runtime state. The `gids` vector and `cwd` path are
+    // pre-built before the closure (before `fork`), so no heap allocation occurs
+    // in the child, and no I/O.
     unsafe {
         command.pre_exec(move || {
             let target_gid = nix::unistd::Gid::from_raw(gid);
@@ -178,6 +192,10 @@ fn apply_privilege_drop(command: &mut Command, spec: &ChildSpec) {
             nix::unistd::setresgid(target_gid, target_gid, target_gid).map_err(drop_error)?;
             // UID last: this is the step that relinquishes CAP_SETUID/SETGID.
             nix::unistd::setresuid(target_uid, target_uid, target_uid).map_err(drop_error)?;
+            // chdir after setresuid so the kernel evaluates the path as the
+            // peer user — required when the target directory sits inside a
+            // 0700 home dir that the daemon user cannot traverse.
+            nix::unistd::chdir(&cwd).map_err(drop_error)?;
             Ok(())
         });
     }

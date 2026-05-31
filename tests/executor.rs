@@ -402,3 +402,141 @@ async fn large_output_bounded_memory() {
     }
     assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
 }
+
+// Regression test: chdir must occur after setresuid, not before.
+//
+// The standard library calls chdir() in the forked child BEFORE pre_exec.
+// When the daemon is an unprivileged user and the target cwd is inside a
+// 0700 home directory, that pre-pre_exec chdir fails with EACCES.
+// apply_privilege_drop fixes this by resetting the command cwd to "/" and
+// performing the real chdir inside pre_exec, after setresuid.
+//
+// This test verifies the fix with a cwd that is only accessible to the
+// current user (mode 0700), without needing root.
+#[cfg(unix)]
+#[tokio::test]
+async fn chdir_after_setresuid_skips_for_self() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Create a temp dir accessible only to the current user.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let restricted = dir.path().join("private");
+    std::fs::create_dir(&restricted).unwrap();
+    std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let own = nix::unistd::geteuid().as_raw();
+    // uid == own_euid → skip-drop path: current_dir("/") is NOT applied,
+    // so the cwd is set normally via Command::current_dir to `restricted`.
+    // The child runs as us and can access the 0700 dir just fine.
+    let spec = ChildSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), "pwd".into()],
+        env: vec![("HOME".into(), "/tmp".into())],
+        cwd: restricted.clone(),
+        uid: Some(own),
+        gid: Some(nix::unistd::getegid().as_raw()),
+        supplementary_gids: Vec::new(),
+        home: None,
+    };
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    let frames = collect_frames(buf).await;
+    // Self-skip → child ran in restricted dir, exited 0.
+    assert!(
+        matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })),
+        "expected exit 0 for self-uid spec in 0700 dir, got: {frames:?}"
+    );
+}
+
+// Regression test: ssh key must be reachable when credentials dir is traversable (0711).
+//
+// Root cause of the bug: deploy/linux/install.sh created /etc/ghbrk/credentials
+// with mode 0700 (owner-only). After privilege drop, git spawns ssh as the peer
+// user. ssh tries to open /etc/ghbrk/credentials/<user>/id_rsa. The peer user
+// is not the ghbrk owner, so the 0700 directory denies traversal → EACCES.
+//
+// The fix sets the directory to 0711 (owner:rwx, group:--x, others:--x), which
+// allows any user to traverse (execute bit) without being able to list contents
+// (no read bit for group/others). This test verifies that a subprocess can cat
+// a file inside a 0711 directory but NOT inside a 0000 directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_key_reachable_after_dir_made_traversable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Create a temp dir. Inside it create "creds/" and "creds/id_rsa".
+    let dir = tempfile::tempdir().expect("tempdir");
+    let creds = dir.path().join("creds");
+    std::fs::create_dir(&creds).unwrap();
+    let id_rsa = creds.join("id_rsa");
+    std::fs::write(&id_rsa, b"FAKE_KEY").unwrap();
+    std::fs::set_permissions(&id_rsa, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    // Block traversal of the outer temp dir entirely (mode 0000).
+    // Even the owner cannot traverse it — this simulates the 0700 scenario
+    // where the peer user (non-owner) would be denied.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let id_rsa_str = id_rsa.to_string_lossy().to_string();
+    let spec_blocked = ChildSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), format!("cat {id_rsa_str}")],
+        env: vec![],
+        cwd: std::env::temp_dir(), // root-level temp dir, always accessible
+        uid: None,
+        gid: None,
+        supplementary_gids: Vec::new(),
+        home: None,
+    };
+
+    let mut buf = Vec::new();
+    stream_child(&spec_blocked, &mut buf).await.unwrap();
+    let frames_blocked = collect_frames(buf).await;
+
+    // CRITICAL: restore mode before any assertion that could panic, so that
+    // TempDir::drop can clean up the directory even if an assertion fails.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+
+    // With mode 0000 the child must fail (EACCES → non-zero exit).
+    let blocked_exit = frames_blocked
+        .iter()
+        .find_map(|f| {
+            if let ServerFrame::Exit { code } = f {
+                Some(*code)
+            } else {
+                None
+            }
+        })
+        .expect("expected an Exit frame in blocked run");
+    assert_ne!(
+        blocked_exit, 0,
+        "expected non-zero exit when directory is mode 0000 (EACCES), got 0; frames: {frames_blocked:?}"
+    );
+
+    // Now with mode 0711 the child must succeed and print "FAKE_KEY".
+    let spec_traversable = ChildSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), format!("cat {id_rsa_str}")],
+        env: vec![],
+        cwd: std::env::temp_dir(),
+        uid: None,
+        gid: None,
+        supplementary_gids: Vec::new(),
+        home: None,
+    };
+
+    let mut buf2 = Vec::new();
+    stream_child(&spec_traversable, &mut buf2).await.unwrap();
+    let frames_ok = collect_frames(buf2).await;
+
+    assert!(
+        matches!(frames_ok.last(), Some(ServerFrame::Exit { code: 0 })),
+        "expected exit 0 when directory is mode 0711, got: {frames_ok:?}"
+    );
+    let stdout = concat_stdout(&frames_ok);
+    assert!(
+        stdout.windows(8).any(|w| w == b"FAKE_KEY"),
+        "expected stdout to contain 'FAKE_KEY' after traversable dir fix, got: {:?}",
+        String::from_utf8_lossy(&stdout)
+    );
+}
