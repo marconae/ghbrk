@@ -282,3 +282,33 @@ fn cargo_deny_passes_on_real_tree() {
     // Run: cargo deny check
     // Expected: advisories ok, bans ok, licenses ok, sources ok
 }
+
+// ---------------------------------------------------------------------------
+// SSH credentials traversal regression test
+// ---------------------------------------------------------------------------
+
+/// Regression test: /etc/ghbrk/credentials must be mode 0711, not 0700.
+///
+/// After privilege drop, git spawns ssh as the peer user with:
+///   GIT_SSH_COMMAND="ssh -i /etc/ghbrk/credentials/<user>/id_rsa ..."
+/// ssh runs as the peer user, which is NOT the ghbrk owner. A 0700 directory
+/// only grants rwx to the owner (ghbrk); group and others get nothing.
+/// The peer user therefore hits EACCES when trying to traverse into their
+/// own subdirectory to reach id_rsa.
+///
+/// Mode 0711 (owner:rwx, group:--x, others:--x) allows any user to traverse
+/// (execute bit) without being able to list the directory contents (no read
+/// bit for group/others), preserving confidentiality of the directory listing
+/// while enabling ssh to reach the key file.
+#[test]
+fn credentials_dir_mode_is_traversable() {
+    let script = read_install_sh();
+    assert!(
+        script.contains("-m 0711"),
+        "install.sh must set credentials dir to mode 0711 (traversable by peer users for SSH key access)"
+    );
+    assert!(
+        script.contains("/etc/ghbrk/credentials"),
+        "install.sh must reference /etc/ghbrk/credentials"
+    );
+}
