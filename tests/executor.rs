@@ -21,6 +21,10 @@ fn sh_spec(script: &str) -> ChildSpec {
         args: vec!["-c".into(), script.to_string()],
         env: vec![],
         cwd: cwd(),
+        uid: None,
+        gid: None,
+        supplementary_gids: Vec::new(),
+        home: None,
     }
 }
 
@@ -112,6 +116,10 @@ async fn child_cwd_matches_request() {
         args: vec![],
         env: vec![],
         cwd: canonical.clone(),
+        uid: None,
+        gid: None,
+        supplementary_gids: Vec::new(),
+        home: None,
     };
     let mut buf = Vec::new();
     stream_child(&spec, &mut buf).await.unwrap();
@@ -175,6 +183,10 @@ async fn spawn_failure_emits_denied() {
         args: vec![],
         env: vec![],
         cwd: cwd(),
+        uid: None,
+        gid: None,
+        supplementary_gids: Vec::new(),
+        home: None,
     };
     let mut buf = Vec::new();
     stream_child(&spec, &mut buf).await.unwrap();
@@ -189,6 +201,181 @@ async fn spawn_failure_emits_denied() {
         }
         other => panic!("expected Denied, got {other:?}"),
     }
+}
+
+/// An unprivileged uid that is neither root nor (assumed) the test runner's own
+/// uid. `nobody` is conventionally 65534 across Linux distros.
+const NOBODY_UID: u32 = 65534;
+
+/// A `ChildSpec` running `id -u` with a valid HOME so the child never fails for
+/// reasons unrelated to the privilege-drop path under test.
+fn id_u_spec(uid: Option<u32>, gid: Option<u32>) -> ChildSpec {
+    ChildSpec {
+        program: "id".into(),
+        args: vec!["-u".into()],
+        env: vec![("HOME".to_string(), "/tmp".to_string())],
+        cwd: cwd(),
+        uid,
+        gid,
+        supplementary_gids: Vec::new(),
+        home: None,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn skips_drop_for_uid_none() {
+    let spec = id_u_spec(None, None);
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    let frames = collect_frames(buf).await;
+    let stdout = String::from_utf8(concat_stdout(&frames)).unwrap();
+    let own = nix::unistd::geteuid().as_raw();
+    assert_eq!(stdout.trim(), own.to_string(), "frames: {frames:?}");
+    assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn skips_drop_for_root_uid() {
+    // Targeting uid 0 must hit the `uid == 0` guard and leave the child as the
+    // daemon's own identity. Meaningless if we are already root.
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let spec = id_u_spec(Some(0), Some(0));
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    let frames = collect_frames(buf).await;
+    let stdout = String::from_utf8(concat_stdout(&frames)).unwrap();
+    let own = nix::unistd::geteuid().as_raw();
+    assert_eq!(
+        stdout.trim(),
+        own.to_string(),
+        "root-uid drop should have been skipped; frames: {frames:?}"
+    );
+    assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn skips_drop_for_self_uid() {
+    let own_uid = nix::unistd::geteuid().as_raw();
+    let own_gid = nix::unistd::getegid().as_raw();
+    let spec = id_u_spec(Some(own_uid), Some(own_gid));
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    let frames = collect_frames(buf).await;
+    let stdout = String::from_utf8(concat_stdout(&frames)).unwrap();
+    assert_eq!(stdout.trim(), own_uid.to_string(), "frames: {frames:?}");
+    assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn drops_to_target_uid_gid_when_root() {
+    let own = nix::unistd::geteuid().as_raw();
+    let target = if own != NOBODY_UID { NOBODY_UID } else { 65533 };
+    let spec = id_u_spec(Some(target), Some(target));
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    let frames = collect_frames(buf).await;
+
+    if nix::unistd::geteuid().is_root() {
+        // With CAP_SETUID/CAP_SETGID the drop succeeds and the child reports the
+        // target uid.
+        let stdout = String::from_utf8(concat_stdout(&frames)).unwrap();
+        assert_eq!(stdout.trim(), target.to_string(), "frames: {frames:?}");
+        assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+    } else {
+        // Without the capability the kernel refuses the drop and the executor
+        // fails closed with a Denied frame.
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, ServerFrame::Denied { .. })),
+            "expected Denied frame for unprivileged uid-drop, got: {frames:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn home_overridden_on_privilege_drop_when_root() {
+    if !nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let target = NOBODY_UID;
+    let spec = ChildSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), "echo $HOME".into()],
+        env: vec![],
+        cwd: cwd(),
+        uid: Some(target),
+        gid: Some(target),
+        supplementary_gids: Vec::new(),
+        home: Some(PathBuf::from("/tmp")),
+    };
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    let frames = collect_frames(buf).await;
+    let stdout = String::from_utf8(concat_stdout(&frames)).unwrap();
+    assert_eq!(stdout.trim(), "/tmp", "frames: {frames:?}");
+    assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn empty_supplementary_gids_still_spawns() {
+    // uid == own_euid hits the self-skip guard, so the drop (and setgroups) is
+    // never applied. The point is that an empty supplementary_gids vec does not
+    // crash the spawn path.
+    let own_uid = nix::unistd::geteuid().as_raw();
+    let own_gid = nix::unistd::getegid().as_raw();
+    let spec = ChildSpec {
+        program: "id".into(),
+        args: vec!["-u".into()],
+        env: vec![("HOME".to_string(), "/tmp".to_string())],
+        cwd: cwd(),
+        uid: Some(own_uid),
+        gid: Some(own_gid),
+        supplementary_gids: vec![],
+        home: None,
+    };
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    let frames = collect_frames(buf).await;
+    assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_drop_emits_denied_not_crash() {
+    if nix::unistd::geteuid().is_root() {
+        return; // root can always drop — this test is meaningless as root
+    }
+    let own = nix::unistd::geteuid().as_raw();
+    let target_uid = if own != 65534 { 65534 } else { 65533 };
+    let spec = ChildSpec {
+        program: "id".into(),
+        args: vec!["-u".into()],
+        env: vec![],
+        cwd: std::env::current_dir().unwrap(),
+        uid: Some(target_uid),
+        gid: Some(target_uid),
+        supplementary_gids: vec![],
+        home: None,
+    };
+    let mut buf = Vec::new();
+    stream_child(&spec, &mut buf).await.unwrap();
+    // Must get a Denied frame, NOT a panic or exit-code frame
+    let frames = collect_frames(buf).await;
+    assert!(
+        frames
+            .iter()
+            .any(|f| matches!(f, ServerFrame::Denied { .. })),
+        "expected Denied frame for unprivileged uid-drop, got: {frames:?}"
+    );
 }
 
 #[tokio::test]

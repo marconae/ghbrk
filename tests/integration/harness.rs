@@ -1162,3 +1162,438 @@ fn gh_api_broker_missing_token() {
         "expected a meaningful credential error: {combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Privilege-drop e2e (Group F, task 6.2)
+//
+// Proves `ghbrk git push` succeeds for a user whose home directory is mode
+// `0700` *without* `chmod o+x ~`. The whole pipeline runs inside `devenv`:
+//
+//   * The daemon runs as root and is the only process that can read the
+//     0700 home dir before privilege drop.
+//   * `priv-testuser` (uid 2001, see Dockerfile.devenv) connects the shim.
+//   * The daemon resolves the peer via SO_PEERCRED, then drops privileges to
+//     uid 2001 before spawning git, so git traverses `/home/priv-testuser`
+//     (mode 0700) as the owner rather than as root.
+//
+// If privilege drop were broken — i.e. git ran as root through a 0700 home —
+// SSH or git would refuse, and the push assertion below would fail.
+//
+// Unlike the SSH git tests above (which drive a host-built daemon against the
+// host-published port 2222), this test reaches `git-server` over the Docker
+// network at hostname `git-server` port 22. The URL-rewrite wrapper therefore
+// targets `ssh://git@git-server/home/git/repos/` and omits the host port.
+// ---------------------------------------------------------------------------
+
+/// Credentials root, policy, audit log, socket, and wrapper dir used by the
+/// privilege-drop test. Kept separate from the `gh api` test's paths so the
+/// two suites never collide on a shared file.
+const PRIV_CREDS_ROOT: &str = "/tmp/priv-drop-creds";
+const PRIV_POLICY: &str = "/tmp/priv-drop-policy.yaml";
+const PRIV_AUDIT: &str = "/tmp/priv-drop-audit.log";
+const PRIV_SOCKET: &str = "/tmp/priv-drop.sock";
+const PRIV_BIN_DIR: &str = "/tmp/priv-drop-bin";
+const PRIV_KEY: &str = "/tmp/priv-drop-id_rsa";
+const PRIV_HOME: &str = "/home/priv-testuser";
+
+/// `ls-remote` for `refs/heads/main` of the bare repo, executed from inside
+/// `devenv` over the Docker network using the test's SSH key. Returns the SHA
+/// of `refs/heads/main` if it exists. Used both to wait for the server and to
+/// snapshot the ref before/after the push.
+fn priv_remote_main_sha() -> Option<String> {
+    let ssh =
+        format!("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {PRIV_KEY}");
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            DEVENV_CONTAINER,
+            "env",
+            &format!("GIT_SSH_COMMAND={ssh}"),
+            "/usr/bin/git",
+            "ls-remote",
+            "ssh://git@git-server/home/git/repos/test.git",
+            "refs/heads/main",
+        ])
+        .output()
+        .expect("ls-remote in devenv");
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().next())
+        .map(str::to_string)
+}
+
+#[test]
+fn e2e_privilege_drop_0700_home() {
+    if skip_if_no_docker("e2e_privilege_drop_0700_home") {
+        return;
+    }
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _compose = start_compose();
+    wait_for_devenv(Duration::from_secs(60));
+
+    // Copy the static musl binary into devenv (same pattern as provision_devenv).
+    let bin_path = build_static_binary();
+    let cp = Command::new("docker")
+        .args([
+            "cp",
+            bin_path.to_str().unwrap(),
+            &format!("{DEVENV_CONTAINER}:{CONTAINER_BIN}"),
+        ])
+        .output()
+        .expect("docker cp");
+    assert!(
+        cp.status.success(),
+        "docker cp failed: {}",
+        String::from_utf8_lossy(&cp.stderr)
+    );
+    let chmod = docker_exec(DEVENV_CONTAINER, &["chmod", "755", CONTAINER_BIN]);
+    assert!(chmod.status.success(), "chmod binary failed");
+
+    // Generate an ed25519 keypair inside devenv (as root). Generating in the
+    // container avoids any host keygen dependency differences.
+    docker_exec(
+        DEVENV_CONTAINER,
+        &["rm", "-f", PRIV_KEY, &format!("{PRIV_KEY}.pub")],
+    );
+    let kg = docker_exec(
+        DEVENV_CONTAINER,
+        &[
+            "ssh-keygen",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-q",
+            "-C",
+            "priv-drop-test",
+            "-f",
+            PRIV_KEY,
+        ],
+    );
+    assert!(
+        kg.status.success(),
+        "ssh-keygen in devenv failed: {}",
+        String::from_utf8_lossy(&kg.stderr)
+    );
+    let pubkey_out = docker_exec(DEVENV_CONTAINER, &["cat", &format!("{PRIV_KEY}.pub")]);
+    assert!(pubkey_out.status.success(), "read pubkey failed");
+    let public_key = String::from_utf8_lossy(&pubkey_out.stdout)
+        .trim()
+        .to_string();
+
+    // Authorize the key on git-server (reachable from the host at HOST_PORT,
+    // which is the same container the Docker network exposes as `git-server`).
+    inject_authorized_key(&public_key);
+
+    // Wait until git-server answers a git request over the Docker network. The
+    // login shell is git-shell, so only a real git op (ls-remote) is a valid
+    // reachability probe. An empty bare repo returns success with no refs.
+    let net_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let ssh = format!(
+            "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -i {PRIV_KEY}"
+        );
+        let probe = Command::new("docker")
+            .args([
+                "exec",
+                DEVENV_CONTAINER,
+                "env",
+                &format!("GIT_SSH_COMMAND={ssh}"),
+                "/usr/bin/git",
+                "ls-remote",
+                "ssh://git@git-server/home/git/repos/test.git",
+            ])
+            .output()
+            .expect("ls-remote reachability probe");
+        if probe.status.success() {
+            break;
+        }
+        assert!(
+            Instant::now() < net_deadline,
+            "git-server not reachable from devenv: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    // Seed the bare repo with an initial commit on `main`, entirely inside
+    // devenv using the generated key. git-shell permits only git operations,
+    // so seeding is done with a `git push` rather than shell commands on the
+    // server. This creates refs/heads/main for the later clone/push.
+    let seed = Command::new("docker")
+        .args([
+            "exec",
+            DEVENV_CONTAINER,
+            "env",
+            &format!(
+                "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {PRIV_KEY}"
+            ),
+            "sh",
+            "-c",
+            "rm -rf /tmp/priv-drop-seed && \
+             git init -b main /tmp/priv-drop-seed && \
+             cd /tmp/priv-drop-seed && \
+             git config user.email seed@test.local && \
+             git config user.name seed && \
+             echo seed > seed.txt && \
+             git add seed.txt && \
+             git commit -m 'priv-drop seed' && \
+             git push ssh://git@git-server/home/git/repos/test.git main:refs/heads/main",
+        ])
+        .output()
+        .expect("seed push in devenv");
+    assert!(
+        seed.status.success(),
+        "seeding bare repo failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&seed.stdout),
+        String::from_utf8_lossy(&seed.stderr)
+    );
+
+    // Credentials for priv-testuser. The broker reads
+    // <GHBRK_CREDENTIALS_ROOT>/<username>/{id_rsa,token}; both must be 0600 and
+    // readable by uid 2001 (the privilege-dropped child reads the key).
+    let creds_dir = format!("{PRIV_CREDS_ROOT}/priv-testuser");
+    let mk = docker_exec(DEVENV_CONTAINER, &["mkdir", "-p", &creds_dir]);
+    assert!(mk.status.success(), "mkdir creds dir failed");
+    let cp_key = docker_exec(
+        DEVENV_CONTAINER,
+        &["cp", PRIV_KEY, &format!("{creds_dir}/id_rsa")],
+    );
+    assert!(cp_key.status.success(), "copy key into creds failed");
+    docker_exec(
+        DEVENV_CONTAINER,
+        &["chmod", "600", &format!("{creds_dir}/id_rsa")],
+    );
+    // The harness never exercises HTTPS auth, so the token is a placeholder.
+    write_file_in_container(
+        DEVENV_CONTAINER,
+        &format!("{creds_dir}/token"),
+        "placeholder\n",
+        "600",
+    );
+    // Make the whole creds tree owned by priv-testuser so the dropped child
+    // can read the key (mode 0600 means only the owner may read it).
+    let chown = docker_exec(
+        DEVENV_CONTAINER,
+        &[
+            "chown",
+            "-R",
+            "priv-testuser:priv-testuser",
+            PRIV_CREDS_ROOT,
+        ],
+    );
+    assert!(chown.status.success(), "chown creds failed");
+
+    // Allow policy scoped to priv-testuser / test-org / test.
+    write_file_in_container(
+        DEVENV_CONTAINER,
+        PRIV_POLICY,
+        "rules:\n  \
+         - user: \"priv-testuser\"\n    \
+           org: \"test-org\"\n    \
+           repo: \"test\"\n    \
+           branches: [\"*\"]\n    \
+           operations: [push, fetch, clone]\n    \
+           effect: allow\n",
+        "644",
+    );
+
+    // URL-rewrite wrapper on the daemon's PATH. The broker resolves git through
+    // its own PATH, so the wrapper must shadow /usr/bin/git for the daemon. It
+    // rewrites the canonical GitHub URL to the Docker-network git-server and
+    // preserves the broker-supplied GIT_SSH_COMMAND (which carries `-i <key>`),
+    // only appending host-key options.
+    docker_exec(DEVENV_CONTAINER, &["mkdir", "-p", PRIV_BIN_DIR]);
+    write_file_in_container(
+        DEVENV_CONTAINER,
+        &format!("{PRIV_BIN_DIR}/git"),
+        "#!/bin/sh\n\
+         GIT_SSH_COMMAND=\"${GIT_SSH_COMMAND:-ssh} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\"\n\
+         export GIT_SSH_COMMAND\n\
+         exec /usr/bin/git \\\n  \
+           -c \"url.ssh://git@git-server/home/git/repos/.insteadOf=ssh://git@github.com/test-org/\" \\\n  \
+           \"$@\"\n",
+        "755",
+    );
+
+    // The daemon (root) binds the socket as root:root mode 0660. In production
+    // clients share a group with the broker; here we mirror that by adding
+    // priv-testuser to the root group so the shim may connect to the socket.
+    let grp = docker_exec(
+        DEVENV_CONTAINER,
+        &["usermod", "-aG", "root", "priv-testuser"],
+    );
+    assert!(
+        grp.status.success(),
+        "usermod add priv-testuser to root group failed: {}",
+        String::from_utf8_lossy(&grp.stderr)
+    );
+
+    // Start the daemon as root, with the wrapper first on PATH so the broker's
+    // git lookup resolves to it. Separate socket from the gh-api suite.
+    let _ = docker_exec(DEVENV_CONTAINER, &["rm", "-f", PRIV_SOCKET]);
+    let detached = Command::new("docker")
+        .args([
+            "exec",
+            "-d",
+            DEVENV_CONTAINER,
+            "env",
+            &format!("GHBRK_SOCKET={PRIV_SOCKET}"),
+            &format!("GHBRK_POLICY={PRIV_POLICY}"),
+            &format!("GHBRK_AUDIT_LOG={PRIV_AUDIT}"),
+            &format!("GHBRK_CREDENTIALS_ROOT={PRIV_CREDS_ROOT}"),
+            &format!("PATH={PRIV_BIN_DIR}:/usr/bin:/bin"),
+            CONTAINER_BIN,
+            "daemon",
+        ])
+        .output()
+        .expect("docker exec -d daemon");
+    assert!(
+        detached.status.success(),
+        "start daemon failed: {}",
+        String::from_utf8_lossy(&detached.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let t = docker_exec(DEVENV_CONTAINER, &["test", "-S", PRIV_SOCKET]);
+        if t.status.success() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon socket did not appear");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Clone into priv-testuser's 0700 home, as priv-testuser. The clone uses
+    // the wrapper directly (not the broker) so it is rewritten + keyed via the
+    // wrapper's GIT_SSH_COMMAND default. We feed the key explicitly here since
+    // there is no broker to inject it; it must be the creds-dir copy, which is
+    // owned by priv-testuser (the root-owned 0600 PRIV_KEY is unreadable to us).
+    let clone = Command::new("docker")
+        .args([
+            "exec",
+            "--user",
+            "priv-testuser",
+            "-e",
+            &format!("HOME={PRIV_HOME}"),
+            "-e",
+            &format!("PATH={PRIV_BIN_DIR}:/usr/bin:/bin"),
+            "-e",
+            &format!(
+                "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {PRIV_CREDS_ROOT}/priv-testuser/id_rsa"
+            ),
+            DEVENV_CONTAINER,
+            "git",
+            "clone",
+            HARNESS_GIT_URL,
+            &format!("{PRIV_HOME}/testrepo"),
+        ])
+        .output()
+        .expect("docker exec git clone");
+    assert!(
+        clone.status.success(),
+        "clone as priv-testuser failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&clone.stdout),
+        String::from_utf8_lossy(&clone.stderr)
+    );
+
+    // Make a commit as priv-testuser.
+    let commit = Command::new("docker")
+        .args([
+            "exec",
+            "--user",
+            "priv-testuser",
+            "-e",
+            &format!("HOME={PRIV_HOME}"),
+            DEVENV_CONTAINER,
+            "sh",
+            "-c",
+            "cd /home/priv-testuser/testrepo && \
+             git config user.email 'priv@test.local' && \
+             git config user.name 'priv-testuser' && \
+             echo change > priv-change.txt && \
+             git add priv-change.txt && \
+             git commit -m 'priv-drop test commit'",
+        ])
+        .output()
+        .expect("git commit as priv-testuser");
+    assert!(
+        commit.status.success(),
+        "commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let before = priv_remote_main_sha().expect("seeded main ref must exist");
+
+    // THE KEY ASSERTION: push through the ghbrk shim as priv-testuser. The
+    // daemon (root) resolves the peer as uid 2001, drops privileges, and spawns
+    // git as priv-testuser so it can traverse the 0700 home.
+    // The shim resolves the repo from its current working directory (not a `-C`
+    // flag), so run it inside the checkout via docker's --workdir.
+    let push = Command::new("docker")
+        .args([
+            "exec",
+            "--user",
+            "priv-testuser",
+            "--workdir",
+            &format!("{PRIV_HOME}/testrepo"),
+            "-e",
+            &format!("HOME={PRIV_HOME}"),
+            "-e",
+            &format!("GHBRK_SOCKET={PRIV_SOCKET}"),
+            "-e",
+            &format!("PATH={PRIV_BIN_DIR}:/usr/bin:/bin"),
+            DEVENV_CONTAINER,
+            CONTAINER_BIN,
+            "git",
+            "push",
+            "origin",
+            "main",
+        ])
+        .output()
+        .expect("ghbrk git push as priv-testuser");
+    assert!(
+        push.status.success(),
+        "push through 0700 home dir failed (privilege drop not working?): \
+         stdout={} stderr={}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    // The home dir must still be 0700 — nothing relaxed it to make the push work.
+    let stat = docker_exec(DEVENV_CONTAINER, &["stat", "-c", "%a", PRIV_HOME]);
+    let mode = String::from_utf8_lossy(&stat.stdout).trim().to_string();
+    assert_eq!(
+        mode, "700",
+        "home dir mode changed! expected 700, got {mode}"
+    );
+
+    // The remote ref must have advanced.
+    let after = priv_remote_main_sha();
+    assert!(after.is_some(), "refs/heads/main missing after push");
+    assert_ne!(
+        Some(before),
+        after,
+        "refs/heads/main did not advance after push"
+    );
+
+    // The audit log must contain an allow record for the push.
+    let audit = docker_exec(DEVENV_CONTAINER, &["cat", PRIV_AUDIT]);
+    let audit_str = String::from_utf8_lossy(&audit.stdout);
+    let audit_lines: Vec<String> = audit_str
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    assert!(
+        audit_contains_operation(&audit_lines, "push", "allow"),
+        "expected allow audit record for push, audit log: {audit_str}"
+    );
+
+    // Best-effort daemon teardown; the compose guard removes the project on drop.
+    let _ = docker_exec(DEVENV_CONTAINER, &["pkill", "-f", "ghbrk daemon"]);
+}

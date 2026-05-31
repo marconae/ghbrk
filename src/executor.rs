@@ -43,6 +43,18 @@ pub struct ChildSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
+    /// Effective UID the child should drop to before `execve`. `None` keeps the
+    /// daemon's own identity.
+    pub uid: Option<u32>,
+    /// Primary GID the child should drop to before `execve`. `None` keeps the
+    /// daemon's own primary group.
+    pub gid: Option<u32>,
+    /// Supplementary GIDs applied via `setgroups` before the UID drop. Empty
+    /// when none are known or applicable.
+    pub supplementary_gids: Vec<u32>,
+    /// Home directory of the peer user, used to override the child's `HOME`
+    /// when privilege is dropped. `None` keeps the inherited `HOME`.
+    pub home: Option<PathBuf>,
 }
 
 /// Spawn the child described by `spec` and stream its output to `writer`.
@@ -80,6 +92,8 @@ where
         }
     }
 
+    apply_privilege_drop(&mut command, spec);
+
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(err) => {
@@ -101,6 +115,86 @@ where
     write_frame(writer, &ServerFrame::Exit { code }).await?;
     Ok(())
 }
+
+/// Apply a fail-closed privilege drop to `command` based on `spec`.
+///
+/// The drop is applied only when both `uid` and `gid` are present, the target
+/// uid is not root, and it differs from the daemon's own effective uid. Partial
+/// drops are never performed: a missing `uid` or `gid` skips the whole step so
+/// the child cannot end up with a mismatched identity.
+///
+/// Ordering: the whole drop runs inside a single `pre_exec` hook, in the order
+/// `setgroups` → `setresgid` → `setresuid`. This ordering is mandatory — `setgroups`
+/// and `setresgid` require `CAP_SETGID`, which is lost the moment the real/saved
+/// UID is dropped to a non-zero value, so the supplementary-group and primary-
+/// group changes must complete *before* the UID drop.
+///
+/// We deliberately do **not** use `CommandExt::uid()`/`gid()`: the standard
+/// library applies those (and its own internal `setgroups`) *before* running
+/// user `pre_exec` closures, which would drop the UID first and make our
+/// `setgroups` fail with `EPERM`. Performing every step inside one closure puts
+/// the ordering fully under our control.
+///
+/// Fail-closed: any failing syscall returns `Err`, so `execve` never runs and
+/// the caller observes a spawn failure (surfaced as a `Denied` frame) rather
+/// than a child running with a partially-dropped identity.
+#[cfg(unix)]
+fn apply_privilege_drop(command: &mut Command, spec: &ChildSpec) {
+    let (uid, gid) = match (spec.uid, spec.gid) {
+        (Some(uid), Some(gid)) => (uid, gid),
+        _ => return,
+    };
+
+    let own_euid = nix::unistd::geteuid().as_raw();
+    if uid == 0 || uid == own_euid {
+        return;
+    }
+
+    if let Some(home) = &spec.home {
+        if !spec.env.iter().any(|(k, _)| k == "HOME") {
+            command.env("HOME", home);
+        }
+    }
+
+    let gids: Vec<nix::unistd::Gid> = spec
+        .supplementary_gids
+        .iter()
+        .copied()
+        .map(nix::unistd::Gid::from_raw)
+        .collect();
+    // SAFETY: the closure runs in the forked child between `fork` and `execve`,
+    // where the Rust runtime is in an undefined state. It performs only the
+    // `setgroups`/`setresgid`/`setresuid` syscalls and returns; it touches no
+    // shared runtime state. The `gids` vector is pre-built before the closure
+    // (before `fork`), so no heap allocation occurs in the child, and no I/O.
+    unsafe {
+        command.pre_exec(move || {
+            let target_gid = nix::unistd::Gid::from_raw(gid);
+            let target_uid = nix::unistd::Uid::from_raw(uid);
+
+            nix::unistd::setgroups(&gids).map_err(drop_error)?;
+            // Set real, effective, and saved GID so the child cannot restore
+            // its primary group after exec.
+            nix::unistd::setresgid(target_gid, target_gid, target_gid).map_err(drop_error)?;
+            // UID last: this is the step that relinquishes CAP_SETUID/SETGID.
+            nix::unistd::setresuid(target_uid, target_uid, target_uid).map_err(drop_error)?;
+            Ok(())
+        });
+    }
+}
+
+/// Maps a privilege-drop syscall failure to a fail-closed `io::Error` so the
+/// `pre_exec` closure aborts `execve`.
+#[cfg(unix)]
+fn drop_error(_err: nix::errno::Errno) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "privilege drop failed",
+    )
+}
+
+#[cfg(not(unix))]
+fn apply_privilege_drop(_command: &mut Command, _spec: &ChildSpec) {}
 
 /// Concurrently read from stdout and stderr, emitting one frame per read.
 ///
@@ -203,6 +297,10 @@ pub fn spec_from_request(
         args: args.to_vec(),
         env: env.to_vec(),
         cwd: cwd.to_path_buf(),
+        uid: None,
+        gid: None,
+        supplementary_gids: Vec::new(),
+        home: None,
     }
 }
 
@@ -230,6 +328,78 @@ mod tests {
             args: vec![],
             env: vec![],
             cwd: std::env::current_dir().unwrap(),
+            uid: None,
+            gid: None,
+            supplementary_gids: Vec::new(),
+            home: None,
+        };
+        let mut buf = Vec::new();
+        stream_child(&spec, &mut buf).await.unwrap();
+        let frames = collect_frames(buf).await;
+        assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+    }
+
+    #[tokio::test]
+    async fn uid_zero_skips_drop_and_runs_normally() {
+        let spec = ChildSpec {
+            program: "true".into(),
+            args: vec![],
+            env: vec![],
+            cwd: std::env::current_dir().unwrap(),
+            uid: Some(0),
+            gid: Some(0),
+            supplementary_gids: Vec::new(),
+            home: None,
+        };
+        let mut buf = Vec::new();
+        stream_child(&spec, &mut buf).await.unwrap();
+        let frames = collect_frames(buf).await;
+        assert!(matches!(frames.last(), Some(ServerFrame::Exit { code: 0 })));
+    }
+
+    #[tokio::test]
+    async fn drop_to_foreign_uid_as_non_root_fails_closed() {
+        // When we are not root, attempting to drop to a different non-zero uid
+        // is denied by the kernel. The executor must surface a Denied frame and
+        // never panic.
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let own = nix::unistd::geteuid().as_raw();
+        let target = if own == 12345 { 12346 } else { 12345 };
+        let spec = ChildSpec {
+            program: "true".into(),
+            args: vec![],
+            env: vec![],
+            cwd: std::env::current_dir().unwrap(),
+            uid: Some(target),
+            gid: Some(target),
+            supplementary_gids: Vec::new(),
+            home: None,
+        };
+        let mut buf = Vec::new();
+        stream_child(&spec, &mut buf).await.unwrap();
+        let frames = collect_frames(buf).await;
+        assert!(
+            matches!(frames.last(), Some(ServerFrame::Denied { .. })),
+            "expected Denied frame, got {:?}",
+            frames.last()
+        );
+    }
+
+    #[tokio::test]
+    async fn home_override_only_when_caller_absent() {
+        // HOME injection must not clobber a caller-provided HOME. With uid==0 the
+        // drop is skipped, so HOME is left exactly as the caller set it.
+        let spec = ChildSpec {
+            program: "true".into(),
+            args: vec![],
+            env: vec![("HOME".into(), "/caller/home".into())],
+            cwd: std::env::current_dir().unwrap(),
+            uid: Some(0),
+            gid: Some(0),
+            supplementary_gids: Vec::new(),
+            home: Some(PathBuf::from("/peer/home")),
         };
         let mut buf = Vec::new();
         stream_child(&spec, &mut buf).await.unwrap();
@@ -244,6 +414,10 @@ mod tests {
             args: vec![],
             env: vec![],
             cwd: std::env::current_dir().unwrap(),
+            uid: None,
+            gid: None,
+            supplementary_gids: Vec::new(),
+            home: None,
         };
         let mut buf = Vec::new();
         stream_child(&spec, &mut buf).await.unwrap();

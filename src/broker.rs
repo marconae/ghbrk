@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::sys::stat::{umask, Mode};
-use nix::unistd::{chown, Gid, Group, Uid, User};
+use nix::unistd::{chown, getgrouplist, Gid, Group, Uid, User};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -181,10 +181,29 @@ pub fn chown_socket_to_client_group(socket_path: &Path, gid: Gid) {
     }
 }
 
-/// Resolve the peer UID for a connected stream into a username. Returns `None`
-/// if the kernel refuses the credentials lookup or the UID has no entry in
-/// the password database.
-pub fn peer_username(stream: &UnixStream) -> Option<String> {
+/// Resolved Unix identity of a connected peer, derived from `SO_PEERCRED` and
+/// the password database. Carries everything the executor needs to drop
+/// privileges to the calling user.
+pub struct PeerIdentity {
+    /// Login name from the password database.
+    pub username: String,
+    /// Numeric user ID.
+    pub uid: u32,
+    /// Primary numeric group ID.
+    pub gid: u32,
+    /// Supplementary group IDs (excludes the primary GID semantics handled by
+    /// the kernel). Empty when enumeration failed.
+    pub supplementary_gids: Vec<u32>,
+    /// Home directory from the password database.
+    pub home: PathBuf,
+}
+
+/// Resolve the peer of a connected stream into a full Unix identity. Returns
+/// `None` (deny) when the kernel refuses the credentials lookup or the UID has
+/// no entry in the password database. A failure to enumerate supplementary
+/// groups is non-fatal: it degrades to an empty supplementary list while the
+/// primary GID still applies.
+pub fn peer_identity(stream: &UnixStream) -> Option<PeerIdentity> {
     let cred = match getsockopt(&stream.as_fd(), PeerCredentials) {
         Ok(c) => c,
         Err(err) => {
@@ -193,7 +212,51 @@ pub fn peer_username(stream: &UnixStream) -> Option<String> {
         }
     };
     let uid = Uid::from_raw(cred.uid());
-    username_for_uid(uid)
+    let user = match User::from_uid(uid) {
+        Ok(Some(user)) => user,
+        Ok(None) => return None,
+        Err(err) => {
+            warn!(error = %err, "User::from_uid failed");
+            return None;
+        }
+    };
+
+    let supplementary_gids = supplementary_gids_for(&user.name, user.gid);
+
+    Some(PeerIdentity {
+        username: user.name,
+        uid: user.uid.as_raw(),
+        gid: user.gid.as_raw(),
+        supplementary_gids,
+        home: user.dir,
+    })
+}
+
+/// Enumerate the supplementary groups for a user via `getgrouplist`. Returns an
+/// empty list (and logs a warning) when the username cannot be turned into a
+/// `CString` or the lookup fails; the primary GID is unaffected.
+fn supplementary_gids_for(username: &str, primary: Gid) -> Vec<u32> {
+    let name = match std::ffi::CString::new(username) {
+        Ok(name) => name,
+        Err(err) => {
+            warn!(error = %err, user = %username, "username not representable as CString");
+            return Vec::new();
+        }
+    };
+    match getgrouplist(&name, primary) {
+        Ok(groups) => groups.into_iter().map(|g| g.as_raw()).collect(),
+        Err(err) => {
+            warn!(error = %err, user = %username, "getgrouplist failed; proceeding with no supplementary groups");
+            Vec::new()
+        }
+    }
+}
+
+/// Resolve the peer UID for a connected stream into a username. Returns `None`
+/// if the kernel refuses the credentials lookup or the UID has no entry in
+/// the password database.
+pub fn peer_username(stream: &UnixStream) -> Option<String> {
+    peer_identity(stream).map(|identity| identity.username)
 }
 
 /// Map a `Uid` to its Unix username via the password database. Returns `None`
@@ -215,21 +278,21 @@ async fn handle_connection(
     audit: Arc<AuditLogger>,
     credentials_root: Option<Arc<PathBuf>>,
 ) -> Result<(), ConnectionError> {
-    let username = match peer_username(&stream) {
-        Some(name) => name,
+    let identity = match peer_identity(&stream) {
+        Some(identity) => identity,
         None => {
             let mut s = stream;
             send_denied(&mut s, "unknown caller").await.ok();
             return Ok(());
         }
     };
-    debug!(user = %username, "connection accepted");
+    debug!(user = %identity.username, "connection accepted");
     let mut stream = stream;
 
     let request = match read_frame::<_, Request>(&mut stream).await {
         Ok(req) => req,
         Err(err) => {
-            warn!(error = %err, user = %username, "malformed request frame");
+            warn!(error = %err, user = %identity.username, "malformed request frame");
             // Best-effort tell the client; ignore failures because the wire
             // may already be unrecoverable.
             send_denied(&mut stream, "malformed request").await.ok();
@@ -240,7 +303,7 @@ async fn handle_connection(
     process_request(
         &mut stream,
         request,
-        &username,
+        &identity,
         &policy,
         &audit,
         credentials_root.as_deref().map(|a| a.as_path()),
@@ -251,11 +314,13 @@ async fn handle_connection(
 async fn process_request(
     stream: &mut UnixStream,
     request: Request,
-    username: &str,
+    identity: &PeerIdentity,
     policy: &Policy,
     audit: &Arc<AuditLogger>,
     credentials_root: Option<&Path>,
 ) -> Result<(), ConnectionError> {
+    let username = identity.username.as_str();
+
     // Query tools resolve + evaluate policy without executing anything.
     if request.tool == Tool::Explain {
         return handle_explain_request(stream, &request, username, policy).await;
@@ -274,7 +339,7 @@ async fn process_request(
     // `gh repo view`, `gh auth status`) bypass resolve and policy but still
     // receive `GH_TOKEN` injection so the wrapped `gh` is authenticated.
     if request.tool == Tool::Gh && !gh_is_broker_op(&request.args) {
-        return handle_gh_passthrough(stream, &request, username, audit, credentials_root).await;
+        return handle_gh_passthrough(stream, &request, identity, audit, credentials_root).await;
     }
 
     // Defence-in-depth: the `ghbrk git` gateway already filters local-only
@@ -411,6 +476,10 @@ async fn process_request(
         args: request.args.clone(),
         env,
         cwd: request.cwd.clone(),
+        uid: Some(identity.uid),
+        gid: Some(identity.gid),
+        supplementary_gids: identity.supplementary_gids.clone(),
+        home: Some(identity.home.clone()),
     };
 
     if let Err(err) = stream_child(&spec, stream).await {
@@ -447,10 +516,11 @@ fn gh_is_broker_op(args: &[String]) -> bool {
 async fn handle_gh_passthrough(
     stream: &mut UnixStream,
     request: &Request,
-    username: &str,
+    identity: &PeerIdentity,
     audit: &Arc<AuditLogger>,
     credentials_root: Option<&Path>,
 ) -> Result<(), ConnectionError> {
+    let username = identity.username.as_str();
     let creds = match load_user_credentials(username, credentials_root) {
         Ok(c) => c,
         Err(err) => {
@@ -480,6 +550,10 @@ async fn handle_gh_passthrough(
         args: request.args.clone(),
         env: gh_env(&creds),
         cwd: request.cwd.clone(),
+        uid: Some(identity.uid),
+        gid: Some(identity.gid),
+        supplementary_gids: identity.supplementary_gids.clone(),
+        home: Some(identity.home.clone()),
     };
 
     if let Err(err) = stream_child(&spec, stream).await {
@@ -921,6 +995,17 @@ mod tests {
         let uid = Uid::current();
         let name = username_for_uid(uid).expect("current process must have a user");
         assert!(!name.is_empty());
+    }
+
+    #[tokio::test]
+    async fn peer_identity_resolves_current_process() {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        a.set_nonblocking(true).expect("nonblocking");
+        let stream = UnixStream::from_std(a).expect("tokio adoption");
+        let identity = peer_identity(&stream).expect("current process must resolve");
+        assert_eq!(identity.uid, nix::unistd::geteuid().as_raw());
+        assert!(!identity.username.is_empty());
+        assert!(!identity.home.as_os_str().is_empty());
     }
 
     #[test]

@@ -17,4 +17,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 COPY certs/ca.crt /usr/local/share/ca-certificates/ghbrk-test-ca.crt
 RUN update-ca-certificates
 
+# Integration test fixture for privilege-drop e2e test
+RUN useradd -m -u 2001 -s /bin/sh priv-testuser && chmod 700 /home/priv-testuser
+
 ENTRYPOINT ["tail", "-f", "/dev/null"]

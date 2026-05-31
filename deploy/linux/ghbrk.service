@@ -15,10 +15,12 @@ Restart=on-failure
 RestartSec=5s
 # Hardening
 NoNewPrivileges=true
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 ProtectSystem=strict
 PrivateTmp=true
 ReadWritePaths=/run/ghbrk /var/log/ghbrk
-ProtectHome=read-only
+ProtectHome=no  # Required: user-impersonated child processes must write to repos under $HOME
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

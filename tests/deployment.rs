@@ -61,6 +61,40 @@ fn systemd_unit_hardening_directives() {
 }
 
 #[test]
+fn unit_declares_setuid_setgid_capabilities() {
+    let unit = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deploy/linux/ghbrk.service"
+    ))
+    .expect("read ghbrk.service");
+    assert!(
+        unit.contains("AmbientCapabilities=CAP_SETUID CAP_SETGID"),
+        "ghbrk.service must declare AmbientCapabilities=CAP_SETUID CAP_SETGID for privilege drop"
+    );
+    assert!(
+        unit.contains("CapabilityBoundingSet=CAP_SETUID CAP_SETGID"),
+        "ghbrk.service must declare CapabilityBoundingSet=CAP_SETUID CAP_SETGID for privilege drop"
+    );
+}
+
+#[test]
+fn unit_sets_protect_home_no() {
+    let unit = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deploy/linux/ghbrk.service"
+    ))
+    .expect("read ghbrk.service");
+    assert!(
+        unit.contains("ProtectHome=no"),
+        "ghbrk.service must set ProtectHome=no so user-impersonated children can write repos"
+    );
+    assert!(
+        !unit.contains("ProtectHome=read-only"),
+        "ghbrk.service must NOT have ProtectHome=read-only (replaced by ProtectHome=no)"
+    );
+}
+
+#[test]
 fn service_has_runtime_directory() {
     let service = read_service();
     // RuntimeDirectory= creates a private namespace mount invisible to host processes;
@@ -186,6 +220,41 @@ fn install_enables_service() {
     assert!(
         script.contains("systemctl start ghbrk") || script.contains("systemctl restart ghbrk"),
         "install.sh must start the ghbrk service"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Integration test Dockerfile — structural assertions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn devenv_dockerfile_creates_priv_testuser() {
+    let dockerfile = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/integration/Dockerfile.devenv"
+    ))
+    .expect("read Dockerfile.devenv");
+    assert!(
+        dockerfile.contains("priv-testuser"),
+        "Dockerfile.devenv must create priv-testuser for the privilege-drop e2e fixture"
+    );
+    assert!(
+        dockerfile.contains("chmod 700 /home/priv-testuser"),
+        "Dockerfile.devenv must set priv-testuser home to mode 0700"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// README — content guards
+// ---------------------------------------------------------------------------
+
+#[test]
+fn readme_has_no_chmod_home_step() {
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+        .expect("read README.md");
+    assert!(
+        !readme.contains("chmod o+x ~"),
+        "README.md must not instruct users to chmod o+x ~ (privilege drop eliminates this step)"
     );
 }
 
