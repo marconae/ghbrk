@@ -4,7 +4,7 @@ Provides the `ghbrk daemon` Unix socket server that accepts gateway connections,
 
 ## Background
 
-The broker is reached only via the explicit `ghbrk git` / `ghbrk gh` gateway; the transparent argv[0] shim and client-side local/remote split are removed. The `ghbrk git` gateway filters local-only git subcommands before any socket connection, so in normal operation the broker receives only remote/authenticated git operations plus all `gh` invocations (for credential injection). As defence-in-depth the broker still resolves every request and denies anything it cannot map to a known remote operation. All prior binding, peer-credential, and concurrency behaviour is unchanged.
+In addition to the peer username, the broker now resolves the peer's full identity from `SO_PEERCRED` plus the password database: `uid`, primary `gid`, supplementary GIDs, and home directory. This identity is attached to the `ChildSpec` for every executing tool (brokered git and gh passthrough) so the executor can drop the child to the requesting user. Supplementary group lookup failure is non-fatal — the broker logs a warning and proceeds with the primary GID. All prior binding, peer-credential, policy, and concurrency behaviour is unchanged.
 
 The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-clients`. The supported deployment sets the daemon's primary group to `ghbrk-clients` via the systemd unit's `Group=ghbrk-clients` directive, so the socket inherits the correct group on `bind(2)` without requiring a runtime `chown`. A defence-in-depth `chown` remains for daemons started outside systemd or with a non-standard `Group=`; when that chown fails, the daemon logs at `error` level with diagnostic guidance. Linux only — peer credential reading uses `SO_PEERCRED`. Each accepted connection is handled by an independent Tokio task. The daemon must remain running across malformed-request errors and child process failures; it only exits on SIGINT, SIGTERM, or fatal bind errors.
 
@@ -38,11 +38,11 @@ The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-
 
 ### Scenario: Daemon rejects request when caller UID has no Unix user
 
-* *GIVEN* a gateway client connects from a process running as UID 65534
+* *GIVEN* a gateway client connects
 * *AND* UID 65534 does not resolve to a known username
-* *WHEN* the daemon attempts to map the UID
+* *WHEN* the daemon attempts to resolve the peer identity
 * *THEN* the daemon MUST send a `Denied { reason: "unknown caller" }` frame
-* *AND* the daemon MUST close the connection
+* *AND* the daemon MUST NOT spawn any child process
 
 ### Scenario: Daemon handles multiple concurrent connections
 
@@ -74,3 +74,21 @@ The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-
 * *THEN* the broker MUST NOT execute a git process for the request
 * *AND* the broker MUST send a `Denied` frame
 * *AND* the broker MUST write a deny entry to the audit log
+
+### Scenario: Daemon resolves the full peer identity for privilege drop
+
+* *GIVEN* a gateway client connects whose `SO_PEERCRED` reports UID 1001
+* *AND* UID 1001 resolves to a passwd entry with a primary GID and a home directory
+* *WHEN* the daemon prepares to execute the request
+* *THEN* the daemon MUST resolve the peer's primary GID from the password database
+* *AND* the daemon MUST look up the peer's supplementary group memberships
+* *AND* the daemon MUST attach the resolved `uid`, `gid`, supplementary GIDs, and home directory to the `ChildSpec` it builds for every executing tool (brokered git, gh passthrough)
+
+### Scenario: Daemon proceeds with primary GID when supplementary group lookup fails
+
+* *GIVEN* a gateway client whose peer UID resolves to a valid passwd entry
+* *AND* the supplementary group lookup for that user fails or returns no groups
+* *WHEN* the daemon builds the `ChildSpec`
+* *THEN* the daemon SHOULD log the supplementary group lookup failure at `warn` level
+* *AND* the daemon MUST still build the `ChildSpec` with the peer's `uid` and primary `gid`
+* *AND* the daemon MUST NOT deny the request solely because the supplementary group lookup failed

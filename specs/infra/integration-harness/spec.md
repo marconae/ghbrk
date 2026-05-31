@@ -4,9 +4,7 @@ Provides a Docker-based test fixture that runs a real bare-git SSH server and a 
 
 ## Background
 
-The harness lives under `tests/integration/` and is launched by an integration test using `docker compose`. The container exposes an SSH-accessible bare git repo. A test SSH keypair is generated per run; the public key is injected into the container's `authorized_keys`. The daemon is started in a temporary directory with credentials wired to the generated private key. A separate `devenv` service (built from `Dockerfile.devenv`, `debian:bookworm-slim`, running as `root` with `gh`, `git`, and `openssh-client` installed) provides a reachable container for exercising `gh api` through the broker.
-
-To prove the `gh api` → broker → GitHub path end-to-end without a real GitHub token or network access, the compose project additionally runs a `mock-github` service: a minimal HTTPS server (built from `Dockerfile.mock-github`) that answers `GET /api/v3/user` with a fixed JSON body. Because the `gh` CLI enforces HTTPS even when `GH_HOST` points at a non-`github.com` host, the mock serves real TLS using a pre-generated, self-signed test CA and server certificate committed under `tests/integration/certs/` (CN/SAN `mock-github`). The `devenv` image installs that CA into its system trust store at build time so `gh` trusts the mock. The `gh api` harness tests configure the broker with `GH_HOST=mock-github` and a synthetic token, so they always run whenever Docker is available — they no longer skip gracefully.
+With executor privilege drop in place, the harness gains a Linux-only end-to-end test that proves a brokered push succeeds through an unprivileged user's `0700` home directory without any `chmod`. The daemon runs as `root` inside the `devenv` container (where Docker grants `CAP_SETUID`/`CAP_SETGID` to root by default), and the brokered client runs as a dedicated `priv-testuser` (uid 2001) whose home is mode `0700`. This mirrors the real deployment model — a privileged daemon serving unprivileged users — and verifies that home-directory traversal comes from the per-child privilege drop rather than from loosened permissions.
 
 ## Scenarios
 
@@ -79,3 +77,14 @@ To prove the `gh api` → broker → GitHub path end-to-end without a real GitHu
 * *WHEN* the test harness brings up the compose project
 * *THEN* the `devenv` container MUST be running as the `root` user
 * *AND* the container MUST have `gh`, `git`, and `ssh` available on its PATH
+
+### Scenario: Push succeeds through a 0700 home directory without chmod (privilege drop e2e)
+
+* *GIVEN* `priv-testuser` (uid 2001) exists inside the `devenv` container with home `/home/priv-testuser` at mode `0700` containing a git clone of the harness repo
+* *AND* the ghbrk daemon runs as `root` inside `devenv` with `CAP_SETUID`/`CAP_SETGID`, a policy allowing `push` for `priv-testuser`, and SSH credentials registered in the harness git server
+* *AND* no `chmod o+x /home/priv-testuser` is run at any point in the test
+* *WHEN* `priv-testuser` invokes `ghbrk git push origin main` against the daemon socket
+* *THEN* the push MUST succeed with exit status zero
+* *AND* the harness bare repo's `refs/heads/main` MUST point at the pushed commit
+* *AND* `stat -c %a /home/priv-testuser` MUST still report `700`
+* *AND* the audit log MUST contain an allow record for the push

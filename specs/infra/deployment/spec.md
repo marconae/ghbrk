@@ -4,7 +4,7 @@ Provides the artefacts an operator needs to install and run ghbrk on a Linux hos
 
 ## Background
 
-Targets Linux only in v1. The install script creates the `ghbrk` system user and `ghbrk-clients` group, places the binary at `/usr/local/bin/ghbrk`, creates `/etc/ghbrk/`, `/etc/ghbrk/credentials/`, and `/var/log/ghbrk/` with correct ownership and permissions, joins both the `ghbrk` system user and the invoking `$SUDO_USER` into `ghbrk-clients`, installs the systemd unit, and enables and restarts the service. With the explicit gateway, the script does NOT create `/usr/local/bin/git` or `/usr/local/bin/gh` symlinks and there is no `install-shims` step; agents call plain `git`/`gh` and invoke `ghbrk git`/`ghbrk gh` explicitly. The `cargo deny` config rejects any GPL/AGPL/LGPL/SSPL licensed dependency.
+With executor privilege drop in place, setup no longer requires loosening home directory permissions. The README and install script MUST NOT instruct operators to run `chmod o+x ~`, because brokered git operations run as the requesting user and traverse the home directory with that user's own permissions. Targets Linux only in v1.
 
 ## Scenarios
 
@@ -80,3 +80,12 @@ Targets Linux only in v1. The install script creates the `ghbrk` system user and
 * *AND* the script MUST print a notice that the operator SHALL log out and back in (or run `newgrp ghbrk-clients`) for the supplementary group membership to take effect in their existing shell sessions
 * *AND* when `$SUDO_USER` is unset or empty (the script was run as actual root rather than via `sudo`), the script MUST instead print a clear manual-add instruction telling the operator which command to run to add their user to the `ghbrk-clients` group
 * *AND* the script MUST NOT abort if `usermod -aG ghbrk-clients "$SUDO_USER"` is run a second time against a user already in the group
+
+### Scenario: Setup requires no home directory mode change
+
+* *GIVEN* a developer following the README setup instructions on a Linux host
+* *AND* the developer's home directory has the default `0700` mode
+* *WHEN* the developer completes credential and policy setup and runs a brokered git operation
+* *THEN* the documented setup MUST NOT instruct the operator to run `chmod o+x ~` or otherwise loosen home directory permissions
+* *AND* the brokered operation MUST succeed because the daemon drops to the requesting user's UID/GID before spawning the child, so the child traverses the home directory with the user's own permissions
+* *AND* the install script MUST NOT add any new step to grant the `ghbrk` system user access to user home directories

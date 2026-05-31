@@ -4,7 +4,7 @@ Spawns the real `git` or `gh` binary inside the daemon, applying the injected cr
 
 ## Background
 
-The daemon spawns the child with stdout and stderr captured (pipe), stdin closed, and the working directory set to the resolved cwd from the request. Output bytes are forwarded as soon as they arrive — no buffering until child exit. The implementation uses Tokio async readers for stdout and stderr concurrently.
+Privilege drop applied at spawn time is specified in the `executor-privilege-drop` feature.
 
 ## Scenarios
 
@@ -30,8 +30,10 @@ The daemon spawns the child with stdout and stderr captured (pipe), stdin closed
 ### Scenario: Child cwd matches request cwd
 
 * *GIVEN* the request `cwd` is `/home/alice/projects/foo`
-* *WHEN* the executor spawns the child
+* *AND* the `ChildSpec` carries the peer user's `uid` and `gid`
+* *WHEN* the executor spawns the child with privilege drop applied
 * *THEN* the child's working directory MUST be `/home/alice/projects/foo`
+* *AND* the child MUST be able to traverse and write within the directory using the peer user's natural filesystem permissions
 
 ### Scenario: Stdout and stderr are interleaved in arrival order, not merged
 
