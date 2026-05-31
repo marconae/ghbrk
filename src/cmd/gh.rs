@@ -18,9 +18,7 @@ pub fn run(args: &[String]) -> ! {
 
 fn resolve_hints(cwd: &std::path::Path) -> (Option<String>, Option<String>) {
     let git_dir = find_git_dir(cwd);
-    let remote_url = git_dir
-        .as_deref()
-        .and_then(|gd| read_origin_url(gd).ok());
+    let remote_url = git_dir.as_deref().and_then(|gd| read_origin_url(gd).ok());
     let head_branch = git_dir.as_deref().and_then(read_head_branch);
     (remote_url, head_branch)
 }

@@ -223,3 +223,14 @@ fn unknown_subcommand_exits_nonzero() {
         out.status.code()
     );
 }
+
+#[test]
+fn version_flag_prints_version_and_exits_zero() {
+    let out = Command::new(bin())
+        .arg("--version")
+        .output()
+        .expect("failed to run ghbrk --version");
+    assert!(out.status.success(), "exit status: {}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("ghbrk"), "stdout: {stdout}");
+}

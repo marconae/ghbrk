@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ghbrk", about = "Privilege-separated git/gh broker")]
+#[command(name = "ghbrk", version, about = "Privilege-separated git/gh broker")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
