@@ -1,6 +1,6 @@
 # Feature: deployment
 
-Provides the artefacts an operator needs to install and run ghbrk on a Linux host: an installation script, an annotated example policy, and a `cargo deny` configuration that enforces the MIT-only dependency policy. Systemd unit behaviour is specified separately in `infra/systemd-unit`.
+Provides the artefacts an operator needs to install and run ghbrk on a Linux host: an installation script, an annotated example policy, and a `cargo deny` configuration that enforces the MIT-only dependency policy. Systemd unit behaviour is specified separately in `infra/systemd-unit`. Per-user credential provisioning is specified separately in `infra/credential-provisioning`.
 
 ## Background
 
@@ -20,7 +20,7 @@ With executor privilege drop in place, setup no longer requires loosening home d
 * *GIVEN* a fresh Linux host
 * *WHEN* `install.sh` completes successfully
 * *THEN* `/etc/ghbrk/` MUST exist with mode `0755` and owner `root:root`
-* *AND* `/etc/ghbrk/credentials/` MUST exist with mode `0700` and owner `ghbrk:ghbrk`
+* *AND* `/etc/ghbrk/credentials/` MUST exist with mode `0700` and owner `ghbrk:ghbrk`, NOT permitting traversal by other users
 * *AND* `/var/log/ghbrk/` MUST exist with mode `0750` and owner `ghbrk:ghbrk-clients`
 * *AND* `/run/ghbrk/` MUST be created by `systemd-tmpfiles` at every boot via `/etc/tmpfiles.d/ghbrk.conf` (deployed by `install.sh` from `deploy/linux/ghbrk.tmpfiles`), with owner `ghbrk:ghbrk-clients` and mode `2750`; the unit exposes it via `ReadWritePaths=/run/ghbrk` so the socket is visible to host-namespace processes
 
@@ -89,3 +89,4 @@ With executor privilege drop in place, setup no longer requires loosening home d
 * *THEN* the documented setup MUST NOT instruct the operator to run `chmod o+x ~` or otherwise loosen home directory permissions
 * *AND* the brokered operation MUST succeed because the daemon drops to the requesting user's UID/GID before spawning the child, so the child traverses the home directory with the user's own permissions
 * *AND* the install script MUST NOT add any new step to grant the `ghbrk` system user access to user home directories
+
