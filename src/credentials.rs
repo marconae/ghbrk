@@ -210,23 +210,27 @@ pub fn https_git_env(creds: &Credentials) -> Result<HttpsGitEnv, CredentialError
     })
 }
 
-/// RAII guard for a per-operation ssh-agent process and its temp directory.
+/// RAII guard for a per-operation ssh-agent process, its proxy task, and temp dir.
 ///
-/// Dropping this kills the agent and removes the temp dir, so key material
-/// (in-agent memory) and the socket are cleaned up immediately after the git
-/// invocation completes.
+/// The agent socket is internal (daemon-only). A tokio proxy task bridges a
+/// second socket (`proxy.sock`, accessible to `ghbrk-clients` members) to the
+/// agent, routing around OpenSSH's same-UID check without exposing key bytes.
+/// Dropping this kills the agent, aborts the proxy task, and removes the temp dir.
 pub struct SshAgentHandle {
     pub child: std::process::Child,
     pub temp_dir: std::path::PathBuf,
+    proxy_task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for SshAgentHandle {
     fn drop(&mut self) {
-        // `kill()` sends SIGKILL but does not reap the zombie; the following
-        // `wait()` reaps it so the agent does not linger as a defunct child
-        // for the daemon's lifetime.
+        // Abort the proxy task first so no new agent connections are accepted.
+        // `abort()` is synchronous (signals cancellation; does not await).
+        self.proxy_task.abort();
+        // Kill + reap the agent so it doesn't linger as a zombie.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Remove the temp dir (agent.sock + proxy.sock inside).
         let _ = std::fs::remove_dir_all(&self.temp_dir);
     }
 }
@@ -247,36 +251,38 @@ fn client_group_gid() -> Result<nix::unistd::Gid, CredentialError> {
     }
 }
 
-/// Starts a per-operation `ssh-agent`, loads the user's key into it with a
-/// bounded TTL, and returns the env vars a git child needs (`SSH_AUTH_SOCK`
-/// plus `safe.directory`) together with an [`SshAgentHandle`] that tears the
-/// agent down on drop.
+/// Starts a per-operation `ssh-agent`, loads the user's key into it, and
+/// returns the env vars a git child needs (`SSH_AUTH_SOCK` pointing at a
+/// proxy socket, plus `safe.directory`) together with an [`SshAgentHandle`].
 ///
-/// Security model: the key file is `0600 ghbrk:ghbrk` and is read only here, in
-/// the daemon. The key never reaches the privilege-dropped git child; instead
-/// the child connects to the agent over a `0660 ghbrk:ghbrk-clients` socket and
-/// the agent performs the signing. The agent and its socket are confined to a
-/// `0710 ghbrk:ghbrk-clients` temp dir so only `ghbrk-clients` members can
-/// traverse into it.
+/// # Security model
+///
+/// OpenSSH 10+ rejects agent connections from a different UID than the agent
+/// owner. The daemon (ghbrk) owns the agent, so a privilege-dropped git child
+/// (peer user, different UID) would be rejected if given the agent socket
+/// directly.
+///
+/// Solution — two sockets in the temp dir:
+/// - `agent.sock`: the real ssh-agent socket; only the daemon connects here
+///   (ssh-add runs as daemon → UID matches → accepted).
+/// - `proxy.sock`: a tokio task owned by the daemon bridges connections from
+///   this socket to `agent.sock`. The proxy connects as the daemon (UID check
+///   passes). The git child connects to `proxy.sock`; no UID check applies
+///   because the proxy is our own code, not ssh-agent.
+///
+/// Key bytes never leave the daemon's address space; the git child only
+/// receives challenge signatures relayed through the proxy.
 pub async fn start_ssh_agent(
     creds: &Credentials,
 ) -> Result<(Vec<(String, String)>, SshAgentHandle), CredentialError> {
     let gid = client_group_gid()?;
 
-    // Take ownership of the temp dir immediately: its lifetime is managed by
-    // `SshAgentHandle::drop`, not by `TempDir`'s own drop. On every error path
-    // before the agent spawns we must clean it up explicitly.
     let temp_dir: std::path::PathBuf = tempfile::Builder::new()
         .prefix("ghbrk-ssh-agent-")
         .tempdir()
         .map_err(|err| CredentialError::AgentStartFailed(format!("creating temp dir: {err}")))?
-        // `keep()` is tempfile's non-deprecated equivalent of `into_path()`:
-        // it dissolves the `TempDir` and returns the owned path *without*
-        // scheduling removal, so lifetime is ours (via `SshAgentHandle`).
         .keep();
 
-    // 0710 ghbrk:ghbrk-clients: owner has full access, group may only traverse
-    // (--x) to reach the socket, others have nothing.
     if let Err(err) = std::fs::set_permissions(&temp_dir, std::fs::Permissions::from_mode(0o710)) {
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(CredentialError::AgentStartFailed(format!(
@@ -290,16 +296,13 @@ pub async fn start_ssh_agent(
         )));
     }
 
-    let socket_path = temp_dir.join("agent.sock");
+    let agent_socket = temp_dir.join("agent.sock");
+    let proxy_socket = temp_dir.join("proxy.sock");
 
-    // Spawn the agent with `-D` so it runs in the foreground and remains our
-    // direct child (default behaviour daemonizes, which would orphan it).
-    // std (not tokio) `Command` is required so the resulting `Child` can be
-    // reaped synchronously from `SshAgentHandle::drop`.
-    let agent_child = match std::process::Command::new("ssh-agent")
+    let mut agent_child = match std::process::Command::new("ssh-agent")
         .arg("-D")
         .arg("-a")
-        .arg(&socket_path)
+        .arg(&agent_socket)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -313,78 +316,125 @@ pub async fn start_ssh_agent(
         }
     };
 
-    // Wrap the child in the handle now so that every error return past this
-    // point tears the agent down (kill + reap) and removes the temp dir via
-    // the `Drop` impl — no manual cleanup needed below.
-    let handle = SshAgentHandle {
-        child: agent_child,
-        temp_dir,
-    };
-
-    // Poll for the socket to appear: up to 20 * 50ms = 1s.
+    // Poll for agent.sock: up to 20 × 50 ms = 1 s.
     let mut ready = false;
     for _ in 0..20 {
-        if socket_path.exists() {
+        if agent_socket.exists() {
             ready = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     if !ready {
-        // `handle` drops here, killing the agent and removing the temp dir.
+        let _ = agent_child.kill();
+        let _ = agent_child.wait();
+        let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(CredentialError::AgentStartFailed(
             "ssh-agent socket did not appear within 1s".to_string(),
         ));
     }
 
-    // Load the key into the agent with a bounded TTL. `ssh-add` reads the key
-    // (the daemon can, since it is `0600 ghbrk:ghbrk`) and hands it to the
-    // agent over the socket we just created.
+    // Load the key. ssh-add runs as daemon (ghbrk) → UID matches agent owner → accepted.
     let add_status = std::process::Command::new("ssh-add")
         .arg("-t")
         .arg(SSH_KEY_TTL_SECS.to_string())
         .arg(&creds.ssh_key_path)
-        .env("SSH_AUTH_SOCK", &socket_path)
+        .env("SSH_AUTH_SOCK", &agent_socket)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
     match add_status {
         Ok(status) if status.success() => {}
         Ok(status) => {
-            // `handle` drops here -> agent killed, temp dir removed.
+            let _ = agent_child.kill();
+            let _ = agent_child.wait();
+            let _ = std::fs::remove_dir_all(&temp_dir);
             return Err(CredentialError::AgentStartFailed(format!(
                 "ssh-add exited with status {status}"
             )));
         }
         Err(err) => {
+            let _ = agent_child.kill();
+            let _ = agent_child.wait();
+            let _ = std::fs::remove_dir_all(&temp_dir);
             return Err(CredentialError::AgentStartFailed(format!(
                 "running ssh-add: {err}"
             )));
         }
     }
 
-    // Widen the socket to 0660 and chgrp it to ghbrk-clients so privilege-
-    // dropped git children (members of that group) may connect. ssh-agent
-    // created it 0600 ghbrk:ghbrk.
-    if let Err(err) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))
+    // Bind the proxy socket before setting permissions so the file exists.
+    let listener = match tokio::net::UnixListener::bind(&proxy_socket) {
+        Ok(l) => l,
+        Err(err) => {
+            let _ = agent_child.kill();
+            let _ = agent_child.wait();
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(CredentialError::AgentStartFailed(format!(
+                "binding proxy socket: {err}"
+            )));
+        }
+    };
+    // 0660 ghbrk:ghbrk-clients: group members (privilege-dropped git child) may connect.
+    if let Err(err) =
+        std::fs::set_permissions(&proxy_socket, std::fs::Permissions::from_mode(0o660))
     {
+        let _ = agent_child.kill();
+        let _ = agent_child.wait();
+        let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(CredentialError::AgentStartFailed(format!(
-            "chmod agent socket: {err}"
+            "chmod proxy socket: {err}"
         )));
     }
-    if let Err(err) = chown(&socket_path, None, Some(gid)) {
+    if let Err(err) = chown(&proxy_socket, None, Some(gid)) {
+        let _ = agent_child.kill();
+        let _ = agent_child.wait();
+        let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(CredentialError::AgentStartFailed(format!(
-            "chgrp agent socket: {err}"
+            "chgrp proxy socket: {err}"
         )));
     }
+
+    // Spawn the proxy accept loop inside the daemon's async runtime.
+    // Each accepted connection is bridged to agent_socket (daemon UID → accepted
+    // by ssh-agent). The git child (different UID) only ever sees proxy_socket.
+    let proxy_task = tokio::spawn(run_agent_proxy(listener, agent_socket.clone()));
 
     let mut env_vars = vec![(
         "SSH_AUTH_SOCK".to_string(),
-        socket_path.to_string_lossy().into_owned(),
+        proxy_socket.to_string_lossy().into_owned(),
     )];
     env_vars.extend(git_safe_dir_env());
 
-    Ok((env_vars, handle))
+    Ok((
+        env_vars,
+        SshAgentHandle {
+            child: agent_child,
+            temp_dir,
+            proxy_task,
+        },
+    ))
+}
+
+/// Accept loop that proxies each connection on `listener` to `agent_socket`.
+///
+/// Runs as the daemon (ghbrk), so ssh-agent's UID check passes on the
+/// `agent_socket` side. The git child (different UID) connects only to
+/// `listener`'s socket; no UID check applies there.
+async fn run_agent_proxy(listener: tokio::net::UnixListener, agent_socket: std::path::PathBuf) {
+    while let Ok((client, _)) = listener.accept().await {
+        let sock = agent_socket.clone();
+        tokio::spawn(async move {
+            if let Ok(agent) = tokio::net::UnixStream::connect(&sock).await {
+                let (mut cr, mut cw) = tokio::io::split(client);
+                let (mut ar, mut aw) = tokio::io::split(agent);
+                tokio::select! {
+                    _ = tokio::io::copy(&mut cr, &mut aw) => {}
+                    _ = tokio::io::copy(&mut ar, &mut cw) => {}
+                }
+            }
+        });
+    }
 }
 
 /// Builds env vars for a `gh` invocation.
