@@ -284,31 +284,42 @@ fn cargo_deny_passes_on_real_tree() {
 }
 
 // ---------------------------------------------------------------------------
-// SSH credentials traversal regression test
+// SSH credentials dir mode test
 // ---------------------------------------------------------------------------
 
-/// Regression test: /etc/ghbrk/credentials must be mode 0711, not 0700.
-///
-/// After privilege drop, git spawns ssh as the peer user with:
-///   GIT_SSH_COMMAND="ssh -i /etc/ghbrk/credentials/<user>/id_rsa ..."
-/// ssh runs as the peer user, which is NOT the ghbrk owner. A 0700 directory
-/// only grants rwx to the owner (ghbrk); group and others get nothing.
-/// The peer user therefore hits EACCES when trying to traverse into their
-/// own subdirectory to reach id_rsa.
-///
-/// Mode 0711 (owner:rwx, group:--x, others:--x) allows any user to traverse
-/// (execute bit) without being able to list the directory contents (no read
-/// bit for group/others), preserving confidentiality of the directory listing
-/// while enabling ssh to reach the key file.
+fn read_provision_user_sh() -> String {
+    let path = workspace_root().join("deploy/linux/provision-user.sh");
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+/// The daemon owns the SSH key (0600 ghbrk:ghbrk) and accesses it directly.
+/// Calling users never need to traverse the credentials directory — they
+/// connect to the agent socket via SSH_AUTH_SOCK instead. Mode 0700 ensures
+/// only the ghbrk daemon can enter the credentials tree, eliminating
+/// EACCES exposure to peer users entirely.
 #[test]
-fn credentials_dir_mode_is_traversable() {
+fn credentials_dir_mode_is_0700() {
     let script = read_install_sh();
     assert!(
-        script.contains("-m 0711"),
-        "install.sh must set credentials dir to mode 0711 (traversable by peer users for SSH key access)"
+        script.contains("-m 0700"),
+        "install.sh must set credentials dir to mode 0700 (daemon-owned key, agent escrow: calling user does not traverse)"
     );
     assert!(
         script.contains("/etc/ghbrk/credentials"),
         "install.sh must reference /etc/ghbrk/credentials"
+    );
+}
+
+#[test]
+fn provision_user_creates_ghbrk_owned_id_rsa() {
+    let script = read_provision_user_sh();
+    // id_rsa must be owned by ghbrk:ghbrk so only the daemon can read it.
+    assert!(
+        script.contains("-o ghbrk") && script.contains("-g ghbrk"),
+        "provision-user.sh must create id_rsa owned by ghbrk:ghbrk (not the peer user)"
+    );
+    assert!(
+        script.contains("id_rsa") || script.contains("ID_RSA"),
+        "provision-user.sh must reference id_rsa"
     );
 }

@@ -1375,8 +1375,10 @@ fn e2e_privilege_drop_0700_home() {
         "placeholder\n",
         "600",
     );
-    // Make the whole creds tree owned by priv-testuser so the dropped child
-    // can read the key (mode 0600 means only the owner may read it).
+    // Keep the creds tree owned by priv-testuser so the pre-broker clone step
+    // (which uses -i <key> directly as priv-testuser) can read it. The daemon
+    // (root) also reads the key via ssh-add inside start_ssh_agent — root bypasses
+    // file-permission checks, so it can read any 0600 file regardless of ownership.
     let chown = docker_exec(
         DEVENV_CONTAINER,
         &[
@@ -1405,14 +1407,14 @@ fn e2e_privilege_drop_0700_home() {
     // URL-rewrite wrapper on the daemon's PATH. The broker resolves git through
     // its own PATH, so the wrapper must shadow /usr/bin/git for the daemon. It
     // rewrites the canonical GitHub URL to the Docker-network git-server and
-    // preserves the broker-supplied GIT_SSH_COMMAND (which carries `-i <key>`),
-    // only appending host-key options.
+    // appends host-key options. SSH authentication now comes from SSH_AUTH_SOCK
+    // (injected by the broker's ssh-agent escrow), not from GIT_SSH_COMMAND.
     docker_exec(DEVENV_CONTAINER, &["mkdir", "-p", PRIV_BIN_DIR]);
     write_file_in_container(
         DEVENV_CONTAINER,
         &format!("{PRIV_BIN_DIR}/git"),
         "#!/bin/sh\n\
-         GIT_SSH_COMMAND=\"${GIT_SSH_COMMAND:-ssh} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\"\n\
+         GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\"\n\
          export GIT_SSH_COMMAND\n\
          exec /usr/bin/git \\\n  \
            -c \"url.ssh://git@git-server/home/git/repos/.insteadOf=ssh://git@github.com/test-org/\" \\\n  \
@@ -1420,16 +1422,23 @@ fn e2e_privilege_drop_0700_home() {
         "755",
     );
 
-    // The daemon (root) binds the socket as root:root mode 0660. In production
-    // clients share a group with the broker; here we mirror that by adding
-    // priv-testuser to the root group so the shim may connect to the socket.
+    // Create ghbrk-clients group: required by start_ssh_agent to set access
+    // control on the agent socket (0660 root:ghbrk-clients). Without it the
+    // daemon cannot start the ssh-agent escrow.
+    let mkgrp = docker_exec(DEVENV_CONTAINER, &["groupadd", "--system", "ghbrk-clients"]);
+    assert!(
+        mkgrp.status.success(),
+        "groupadd ghbrk-clients failed: {}",
+        String::from_utf8_lossy(&mkgrp.stderr)
+    );
+    // Add priv-testuser to ghbrk-clients (agent socket) and root (broker socket).
     let grp = docker_exec(
         DEVENV_CONTAINER,
-        &["usermod", "-aG", "root", "priv-testuser"],
+        &["usermod", "-aG", "root,ghbrk-clients", "priv-testuser"],
     );
     assert!(
         grp.status.success(),
-        "usermod add priv-testuser to root group failed: {}",
+        "usermod add priv-testuser to groups failed: {}",
         String::from_utf8_lossy(&grp.stderr)
     );
 
@@ -1468,11 +1477,10 @@ fn e2e_privilege_drop_0700_home() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // Clone into priv-testuser's 0700 home, as priv-testuser. The clone uses
-    // the wrapper directly (not the broker) so it is rewritten + keyed via the
-    // wrapper's GIT_SSH_COMMAND default. We feed the key explicitly here since
-    // there is no broker to inject it; it must be the creds-dir copy, which is
-    // owned by priv-testuser (the root-owned 0600 PRIV_KEY is unreadable to us).
+    // Clone into priv-testuser's 0700 home, as priv-testuser. The clone is run
+    // directly (not through the broker) so we supply GIT_SSH_COMMAND explicitly;
+    // the creds-dir copy of the key is used since the root-owned 0600 PRIV_KEY
+    // is unreadable to priv-testuser.
     let clone = Command::new("docker")
         .args([
             "exec",

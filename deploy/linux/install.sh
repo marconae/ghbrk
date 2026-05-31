@@ -51,7 +51,7 @@ fi
 # 4. Create directories with correct ownership and modes
 # ---------------------------------------------------------------------------
 install -d -m 0755 /etc/ghbrk
-install -d -m 0711 -o ghbrk -g ghbrk /etc/ghbrk/credentials
+install -d -m 0700 -o ghbrk -g ghbrk /etc/ghbrk/credentials
 install -d -m 0750 -o ghbrk -g ghbrk-clients /var/log/ghbrk
 
 # ---------------------------------------------------------------------------

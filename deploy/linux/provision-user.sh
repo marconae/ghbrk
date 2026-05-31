@@ -7,12 +7,12 @@ set -euo pipefail
 #
 # Creates the credential tree under /etc/ghbrk/credentials/:
 #
-#   /etc/ghbrk/credentials/<username>/         mode 750, owner <username>, group ghbrk
-#   /etc/ghbrk/credentials/<username>/id_rsa   mode 600, owner <username>, group <username>
+#   /etc/ghbrk/credentials/<username>/         mode 750, owner ghbrk, group ghbrk
+#   /etc/ghbrk/credentials/<username>/id_rsa   mode 600, owner ghbrk, group ghbrk
 #   /etc/ghbrk/credentials/<username>/token    mode 600, owner ghbrk, group ghbrk
 #
 # The parent /etc/ghbrk/credentials/ must already exist (created by install.sh
-# with mode 0711 so that peer users can traverse into their own subdirectory).
+# with mode 0700 so that only the daemon can traverse into credential subdirectories).
 
 # ---------------------------------------------------------------------------
 # Must run as root
@@ -76,8 +76,8 @@ fi
 # ghbrk daemon can list/traverse; peer user owns and can write their key.
 # ---------------------------------------------------------------------------
 USER_DIR="$CREDS_ROOT/$USERNAME"
-install -d -m 0750 -o "$USERNAME" -g ghbrk "$USER_DIR"
-echo "Created directory: $USER_DIR (mode 0750, owner $USERNAME, group ghbrk)"
+install -d -m 0750 -o ghbrk -g ghbrk "$USER_DIR"
+echo "Created directory: $USER_DIR (mode 0750, owner ghbrk, group ghbrk)"
 
 # ---------------------------------------------------------------------------
 # Create id_rsa placeholder
@@ -86,8 +86,8 @@ echo "Created directory: $USER_DIR (mode 0750, owner $USERNAME, group ghbrk)"
 # ---------------------------------------------------------------------------
 ID_RSA="$USER_DIR/id_rsa"
 if [ ! -f "$ID_RSA" ]; then
-    install -m 0600 -o "$USERNAME" -g "$USERNAME" /dev/null "$ID_RSA"
-    echo "Created placeholder: $ID_RSA (mode 0600, owner $USERNAME)"
+    install -m 0600 -o ghbrk -g ghbrk /dev/null "$ID_RSA"
+    echo "Created placeholder: $ID_RSA (mode 0600, owner ghbrk)"
 else
     echo "File already exists, skipping: $ID_RSA"
 fi
@@ -114,7 +114,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Install the SSH private key:"
 echo "       cp /path/to/id_rsa $ID_RSA"
-echo "       chown $USERNAME:$USERNAME $ID_RSA"
+echo "       chown ghbrk:ghbrk $ID_RSA"
 echo "       chmod 600 $ID_RSA"
 echo ""
 echo "  2. Write the GitHub personal-access token:"

@@ -24,7 +24,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::audit::{AuditDecision, AuditLogger, AuditRecord};
 use crate::credentials::{
-    gh_env, https_git_env, load_credentials, ssh_env, CredentialError, Credentials,
+    gh_env, https_git_env, load_credentials, start_ssh_agent, CredentialError, Credentials,
+    SshAgentHandle,
 };
 use crate::executor::{stream_child, ChildSpec};
 use crate::policy::{Decision, Operation, Policy, Request as PolicyRequest};
@@ -461,15 +462,19 @@ async fn process_request(
     };
 
     // The `_keepalive` binding holds the askpass tempfile alive for the
-    // duration of the git invocation; dropping it removes the script.
-    let (env, _keepalive) = match build_env(&request.tool, &resolved, &creds) {
-        Ok(p) => p,
-        Err(err) => {
-            let reason = format!("credentials: {err}");
-            send_denied(stream, &reason).await?;
-            return Ok(());
-        }
-    };
+    // duration of the git invocation; dropping it removes the script. The
+    // `_agent_keepalive` binding holds the SSH agent escrow alive for the
+    // duration of `stream_child()`; dropping it kills the agent and removes
+    // its temp dir (socket included).
+    let (env, _keepalive, _agent_keepalive) =
+        match build_env(&request.tool, &resolved, &creds).await {
+            Ok(p) => p,
+            Err(err) => {
+                let reason = format!("credentials: {err}");
+                send_denied(stream, &reason).await?;
+                return Ok(());
+            }
+        };
 
     let spec = ChildSpec {
         program: tool_name.to_string(),
@@ -888,27 +893,32 @@ fn load_user_credentials(
     }
 }
 
-/// Pair of (env var bindings, optional RAII keep-alive guard).
+/// Env var bindings plus optional RAII keep-alive guards (HTTPS askpass script, SSH agent).
 type BuiltEnv = (
     Vec<(String, String)>,
     Option<crate::credentials::HttpsGitEnv>,
+    Option<SshAgentHandle>,
 );
 
 /// Build the env-var pairs for the chosen tool and URL scheme. Returns the
-/// vars plus an optional keep-alive RAII guard (for the HTTPS askpass script).
-fn build_env(
+/// vars plus optional keep-alive RAII guards (the HTTPS askpass script and the
+/// SSH agent escrow).
+async fn build_env(
     tool: &Tool,
     resolved: &ResolvedRequest,
     creds: &Credentials,
 ) -> Result<BuiltEnv, CredentialError> {
     match tool {
-        Tool::Gh => Ok((gh_env(creds), None)),
+        Tool::Gh => Ok((gh_env(creds), None, None)),
         Tool::Git => match resolved.url_scheme {
-            UrlScheme::Ssh => Ok((ssh_env(creds), None)),
+            UrlScheme::Ssh => {
+                let (env, handle) = start_ssh_agent(creds).await?;
+                Ok((env, None, Some(handle)))
+            }
             UrlScheme::Https => {
                 let env = https_git_env(creds)?;
                 let vars = env.vars.clone();
-                Ok((vars, Some(env)))
+                Ok((vars, Some(env), None))
             }
         },
         Tool::Check => unreachable!("Tool::Check is handled before build_env"),

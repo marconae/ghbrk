@@ -4,6 +4,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use nix::unistd::{chown, Group};
 use thiserror::Error;
 
 /// Root directory under which per-user credentials live.
@@ -21,6 +22,17 @@ const REQUIRED_MODE: u32 = 0o600;
 
 /// Mask isolating the permission bits of a unix mode.
 const PERMISSION_MASK: u32 = 0o777;
+
+/// Group whose members are permitted to connect to the per-operation
+/// ssh-agent socket. Mirrors `broker::CLIENT_GROUP_NAME`; the daemon runs with
+/// this as a supplementary group and privilege-dropped git children inherit it.
+const CLIENT_GROUP_NAME: &str = "ghbrk-clients";
+
+/// Lifetime (seconds) of a key loaded into the per-operation ssh-agent via
+/// `ssh-add -t`. The agent is killed when the operation completes
+/// (`SshAgentHandle::drop`), but the TTL bounds key residency as defense in
+/// depth in case cleanup is skipped (e.g. the daemon is SIGKILLed).
+const SSH_KEY_TTL_SECS: u64 = 30;
 
 /// Locations of the credential files for a single user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +72,8 @@ pub enum CredentialError {
     IoError(#[from] io::Error),
     #[error("invalid user name {0:?}")]
     InvalidUser(String),
+    #[error("failed to start ssh-agent: {0}")]
+    AgentStartFailed(String),
 }
 
 /// Returns the root credentials directory.
@@ -145,20 +159,6 @@ fn read_token(path: &Path) -> Result<String, CredentialError> {
     Ok(raw.trim_end_matches(['\n', '\r']).to_string())
 }
 
-/// Builds env vars to inject for an SSH-based git operation.
-///
-/// Sets `GIT_SSH_COMMAND` so git uses the configured key and accepts new host
-/// keys on first contact.
-pub fn ssh_env(creds: &Credentials) -> Vec<(String, String)> {
-    let key = creds.ssh_key_path.display();
-    let mut env = vec![(
-        "GIT_SSH_COMMAND".to_string(),
-        format!("ssh -i {key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"),
-    )];
-    env.extend(git_safe_dir_env());
-    env
-}
-
 /// Injects `GIT_CONFIG_*` vars that set `safe.directory = *` so git accepts
 /// repositories owned by a different user. Required when the broker (running as
 /// the `ghbrk` system user) operates on repos owned by the calling user.
@@ -208,6 +208,183 @@ pub fn https_git_env(creds: &Credentials) -> Result<HttpsGitEnv, CredentialError
         vars,
         askpass_script: script,
     })
+}
+
+/// RAII guard for a per-operation ssh-agent process and its temp directory.
+///
+/// Dropping this kills the agent and removes the temp dir, so key material
+/// (in-agent memory) and the socket are cleaned up immediately after the git
+/// invocation completes.
+pub struct SshAgentHandle {
+    pub child: std::process::Child,
+    pub temp_dir: std::path::PathBuf,
+}
+
+impl Drop for SshAgentHandle {
+    fn drop(&mut self) {
+        // `kill()` sends SIGKILL but does not reap the zombie; the following
+        // `wait()` reaps it so the agent does not linger as a defunct child
+        // for the daemon's lifetime.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.temp_dir);
+    }
+}
+
+/// Resolves the `ghbrk-clients` group GID, mapping every failure mode onto
+/// `AgentStartFailed`. Unlike the broker's best-effort socket chgrp, the agent
+/// escrow *requires* the group: without it, privilege-dropped git children
+/// could not connect to the agent socket, so a missing group is a hard error.
+fn client_group_gid() -> Result<nix::unistd::Gid, CredentialError> {
+    match Group::from_name(CLIENT_GROUP_NAME) {
+        Ok(Some(group)) => Ok(group.gid),
+        Ok(None) => Err(CredentialError::AgentStartFailed(format!(
+            "group {CLIENT_GROUP_NAME} not found"
+        ))),
+        Err(err) => Err(CredentialError::AgentStartFailed(format!(
+            "looking up group {CLIENT_GROUP_NAME} failed: {err}"
+        ))),
+    }
+}
+
+/// Starts a per-operation `ssh-agent`, loads the user's key into it with a
+/// bounded TTL, and returns the env vars a git child needs (`SSH_AUTH_SOCK`
+/// plus `safe.directory`) together with an [`SshAgentHandle`] that tears the
+/// agent down on drop.
+///
+/// Security model: the key file is `0600 ghbrk:ghbrk` and is read only here, in
+/// the daemon. The key never reaches the privilege-dropped git child; instead
+/// the child connects to the agent over a `0660 ghbrk:ghbrk-clients` socket and
+/// the agent performs the signing. The agent and its socket are confined to a
+/// `0710 ghbrk:ghbrk-clients` temp dir so only `ghbrk-clients` members can
+/// traverse into it.
+pub async fn start_ssh_agent(
+    creds: &Credentials,
+) -> Result<(Vec<(String, String)>, SshAgentHandle), CredentialError> {
+    let gid = client_group_gid()?;
+
+    // Take ownership of the temp dir immediately: its lifetime is managed by
+    // `SshAgentHandle::drop`, not by `TempDir`'s own drop. On every error path
+    // before the agent spawns we must clean it up explicitly.
+    let temp_dir: std::path::PathBuf = tempfile::Builder::new()
+        .prefix("ghbrk-ssh-agent-")
+        .tempdir()
+        .map_err(|err| CredentialError::AgentStartFailed(format!("creating temp dir: {err}")))?
+        // `keep()` is tempfile's non-deprecated equivalent of `into_path()`:
+        // it dissolves the `TempDir` and returns the owned path *without*
+        // scheduling removal, so lifetime is ours (via `SshAgentHandle`).
+        .keep();
+
+    // 0710 ghbrk:ghbrk-clients: owner has full access, group may only traverse
+    // (--x) to reach the socket, others have nothing.
+    if let Err(err) = std::fs::set_permissions(&temp_dir, std::fs::Permissions::from_mode(0o710)) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(CredentialError::AgentStartFailed(format!(
+            "chmod temp dir: {err}"
+        )));
+    }
+    if let Err(err) = chown(&temp_dir, None, Some(gid)) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(CredentialError::AgentStartFailed(format!(
+            "chgrp temp dir: {err}"
+        )));
+    }
+
+    let socket_path = temp_dir.join("agent.sock");
+
+    // Spawn the agent with `-D` so it runs in the foreground and remains our
+    // direct child (default behaviour daemonizes, which would orphan it).
+    // std (not tokio) `Command` is required so the resulting `Child` can be
+    // reaped synchronously from `SshAgentHandle::drop`.
+    let agent_child = match std::process::Command::new("ssh-agent")
+        .arg("-D")
+        .arg("-a")
+        .arg(&socket_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(CredentialError::AgentStartFailed(format!(
+                "spawning ssh-agent: {err}"
+            )));
+        }
+    };
+
+    // Wrap the child in the handle now so that every error return past this
+    // point tears the agent down (kill + reap) and removes the temp dir via
+    // the `Drop` impl — no manual cleanup needed below.
+    let handle = SshAgentHandle {
+        child: agent_child,
+        temp_dir,
+    };
+
+    // Poll for the socket to appear: up to 20 * 50ms = 1s.
+    let mut ready = false;
+    for _ in 0..20 {
+        if socket_path.exists() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !ready {
+        // `handle` drops here, killing the agent and removing the temp dir.
+        return Err(CredentialError::AgentStartFailed(
+            "ssh-agent socket did not appear within 1s".to_string(),
+        ));
+    }
+
+    // Load the key into the agent with a bounded TTL. `ssh-add` reads the key
+    // (the daemon can, since it is `0600 ghbrk:ghbrk`) and hands it to the
+    // agent over the socket we just created.
+    let add_status = std::process::Command::new("ssh-add")
+        .arg("-t")
+        .arg(SSH_KEY_TTL_SECS.to_string())
+        .arg(&creds.ssh_key_path)
+        .env("SSH_AUTH_SOCK", &socket_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match add_status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            // `handle` drops here -> agent killed, temp dir removed.
+            return Err(CredentialError::AgentStartFailed(format!(
+                "ssh-add exited with status {status}"
+            )));
+        }
+        Err(err) => {
+            return Err(CredentialError::AgentStartFailed(format!(
+                "running ssh-add: {err}"
+            )));
+        }
+    }
+
+    // Widen the socket to 0660 and chgrp it to ghbrk-clients so privilege-
+    // dropped git children (members of that group) may connect. ssh-agent
+    // created it 0600 ghbrk:ghbrk.
+    if let Err(err) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))
+    {
+        return Err(CredentialError::AgentStartFailed(format!(
+            "chmod agent socket: {err}"
+        )));
+    }
+    if let Err(err) = chown(&socket_path, None, Some(gid)) {
+        return Err(CredentialError::AgentStartFailed(format!(
+            "chgrp agent socket: {err}"
+        )));
+    }
+
+    let mut env_vars = vec![(
+        "SSH_AUTH_SOCK".to_string(),
+        socket_path.to_string_lossy().into_owned(),
+    )];
+    env_vars.extend(git_safe_dir_env());
+
+    Ok((env_vars, handle))
 }
 
 /// Builds env vars for a `gh` invocation.
@@ -342,20 +519,17 @@ mod tests {
     }
 
     #[test]
-    fn ssh_env_uses_key_path_and_strict_host_key_accept_new() {
-        let creds = Credentials {
-            ssh_key_path: PathBuf::from("/etc/ghbrk/credentials/alice/id_rsa"),
-            token: "secret".into(),
-        };
-        let env = ssh_env(&creds);
+    fn ssh_env_removed_git_safe_dir_still_works() {
+        let env = git_safe_dir_env();
         let map: std::collections::HashMap<_, _> = env.into_iter().collect();
-        assert_eq!(
-            map["GIT_SSH_COMMAND"],
-            "ssh -i /etc/ghbrk/credentials/alice/id_rsa -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"
-        );
         assert_eq!(map["GIT_CONFIG_COUNT"], "1");
         assert_eq!(map["GIT_CONFIG_KEY_0"], "safe.directory");
         assert_eq!(map["GIT_CONFIG_VALUE_0"], "*");
+        // GIT_SSH_COMMAND injection removed — key escrow now via SSH_AUTH_SOCK
+        assert!(
+            !map.contains_key("GIT_SSH_COMMAND"),
+            "ssh_env was removed; GIT_SSH_COMMAND must not appear in safe.directory env"
+        );
     }
 
     /// Serializes tests that mutate the process-global `GH_HOST` env var.
@@ -553,7 +727,6 @@ mod tests {
             let creds = load_credentials_from(&dir_path, "alice").unwrap();
             // Touch every helper that consumes credentials. None of them may log
             // the token contents.
-            let _ = ssh_env(&creds);
             let _ = gh_env(&creds);
             tracing::debug!(?creds, "credentials loaded");
         });
