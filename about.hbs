@@ -1,0 +1,57 @@
+{{!
+  about.hbs — plain-text LICENSE-THIRD-PARTY template for ghbrk.
+
+  Handlebars context provided by cargo-about:
+    overview  — [{ name, version, repository, license }]  (one entry per crate)
+    licenses  — [{ id, name, text,
+                   used_by: [{ crate: { name, version, repository } }] }]
+
+  Structure:
+    1. DEPENDENCY OVERVIEW — one line per crate (from `overview`)
+    2. FULL LICENSE TEXTS  — deduplicated by license id (from `licenses`);
+       each section lists the crates that use it, then the full text.
+
+  Deduplication means the MIT text appears once even though ~50 crates use it.
+}}
+================================================================================
+THIRD-PARTY LICENSE NOTICES FOR ghbrk
+================================================================================
+
+ghbrk is distributed under the MIT License.
+The binary includes the third-party crates listed below, each governed by
+the license(s) shown.
+
+This file was generated automatically by cargo-about. Do not edit by hand.
+
+================================================================================
+DEPENDENCY OVERVIEW
+================================================================================
+
+{{#each overview}}
+  {{name}} {{version}}
+    License:    {{license}}
+{{#if repository}}
+    Repository: {{repository}}
+{{/if}}
+{{/each}}
+
+================================================================================
+FULL LICENSE TEXTS
+================================================================================
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+License: {{name}} ({{id}})
+--------------------------------------------------------------------------------
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}} <{{crate.repository}}>{{/if}}
+{{/each}}
+
+{{text}}
+
+{{/each}}
+================================================================================
+END OF THIRD-PARTY NOTICES
+================================================================================

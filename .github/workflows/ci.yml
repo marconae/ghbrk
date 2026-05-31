@@ -1,0 +1,98 @@
+# CI — runs on every push and every pull request.
+#
+# Jobs:
+#   lint  — format check, clippy, cargo-deny (advisories / licenses / bans / sources)
+#   test  — lib unit tests, then all integration tests (including Docker harness)
+#
+# The harness test requires Docker + compose plugin and port 2222 free.
+# ubuntu-latest runners provide both; harness.rs skips gracefully when Docker
+# is absent, so local dev without Docker still passes.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Disable incremental compilation — not useful in CI and inflates cache size.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # lint — fast feedback on style, warnings, and supply-chain hygiene
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable (rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Caches ~/.cargo/registry, ~/.cargo/git, ~/.cargo/bin, and target/.
+      # Key shape: {OS}-{rust-toolchain-hash}-{Cargo.lock-hash}.
+      # A Cargo.lock change busts the cache automatically.
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # -D warnings promotes every clippy warning to a hard error.
+      - name: Clippy (all targets, all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Runs cargo deny check against all four categories defined in deny.toml:
+      # advisories, licenses, bans, sources. Emits inline PR annotations.
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ---------------------------------------------------------------------------
+  # test — unit tests, then all integration suites (harness included)
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # Shares the same cache key as the lint job — whichever finishes first
+      # primes the cache for the other.
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      # Fast path: lib unit tests with no system dependencies.
+      - name: Unit tests (lib)
+        run: cargo test --lib
+
+      # All integration test targets in one pass:
+      #   tests/*.rs          — broker_server, executor, resolver, explain,
+      #                          policy_query, deployment, doctor, cli_dispatch,
+      #                          credential_injection, credential_escrow
+      #   tests/integration/  — harness (declared as [[test]] name = "harness")
+      #
+      # --test-threads=1 is required by the harness: all its sub-tests share
+      # one Docker Compose project on a single host port (2222) and must not
+      # run concurrently. The non-harness tests are cheap and tolerate serial
+      # execution without meaningful slowdown.
+      #
+      # credential_escrow root-only tests skip automatically on unprivileged
+      # runners. harness tests skip if Docker is absent — but ubuntu-latest
+      # provides Docker Engine + compose plugin, so they run in full.
+      - name: Integration tests (all suites, serial)
+        run: cargo test --tests -- --test-threads=1

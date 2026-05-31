@@ -1,0 +1,91 @@
+# Release — triggered by a v* tag push (e.g. v1.0.1).
+#
+# Steps:
+#   1. cargo deny check — supply-chain gate before any artefact is built
+#   2. Build stripped release binary for x86_64-unknown-linux-gnu
+#   3. cargo-about generates LICENSE-THIRD-PARTY from about.hbs
+#   4. Package ghbrk-<tag>-x86_64-unknown-linux-gnu.tar.gz
+#   5. Create GitHub Release and upload the tarball
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Explicit target documents intent; on ubuntu-latest the host IS
+          # x86_64-linux so this is a no-op in practice.
+          targets: x86_64-unknown-linux-gnu
+
+      # cache-on-failure=true ensures a failed install step does not evict a
+      # previously warm cache (including a cached cargo-about binary).
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # Re-run deny check unconditionally so a release tag cannot slip through
+      # if it was pushed while a CI lint job was momentarily failing.
+      - name: cargo-deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Build release binary
+        run: cargo build --release --target $TARGET
+
+      # strip removes debug symbols, cutting binary size ~60-70 %.
+      - name: Strip binary
+        run: strip target/$TARGET/release/ghbrk
+
+      # cargo-about walks the dependency graph and renders about.hbs into a
+      # plain-text license file. --locked pins to the exact Cargo.lock tree.
+      # On a cache hit, cargo detects the binary already exists and skips
+      # re-compilation (~3 min saved).
+      - name: Install cargo-about
+        run: cargo install cargo-about --locked
+
+      - name: Generate LICENSE-THIRD-PARTY
+        run: cargo about generate --config about.toml about.hbs --output-file LICENSE-THIRD-PARTY
+
+      # Archive layout:
+      #   ghbrk-v1.0.1-x86_64-unknown-linux-gnu/
+      #     ghbrk
+      #     LICENSE
+      #     LICENSE-THIRD-PARTY
+      - name: Package tarball
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          DIRNAME="ghbrk-${TAG}-${TARGET}"
+          ARCHIVE="${DIRNAME}.tar.gz"
+          mkdir -p "${DIRNAME}"
+          cp "target/${TARGET}/release/ghbrk" "${DIRNAME}/ghbrk"
+          cp LICENSE "${DIRNAME}/LICENSE"
+          cp LICENSE-THIRD-PARTY "${DIRNAME}/LICENSE-THIRD-PARTY"
+          tar czf "${ARCHIVE}" "${DIRNAME}/"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: ${{ env.ARCHIVE }}

@@ -1,0 +1,29 @@
+# cargo-about configuration for ghbrk.
+#
+# The accepted list mirrors deny.toml [licenses].allow exactly so that the
+# set of licenses accepted for `cargo deny check` and the set accepted for
+# LICENSE-THIRD-PARTY generation are always identical. Any divergence would
+# cause cargo-about to refuse to generate the file while cargo-deny still
+# passes, which would be confusing.
+#
+# Reference: https://embarkstudios.github.io/cargo-about/
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+
+# Exclude crates whose license expression is "NOASSERTION" (no detected
+# license) — these are typically proc-macro / build-script host crates that
+# are not shipped in the binary.
+filter-noassertion = true
+
+# Restrict the dependency graph to the release target so that Windows-only or
+# host-only build artefacts do not appear in the distributed license file.
+targets = ["x86_64-unknown-linux-gnu"]
+
