@@ -1512,6 +1512,35 @@ fn e2e_privilege_drop_0700_home() {
         String::from_utf8_lossy(&clone.stderr)
     );
 
+    // The clone was done directly against the docker-internal git-server URL, so
+    // .git/config stores that URL as origin. The broker resolver only accepts
+    // github.com URLs, so rewrite the remote to the canonical GitHub URL before
+    // running the shim. The PRIV_BIN_DIR wrapper will translate it back via
+    // url.insteadOf when git actually executes the push.
+    let set_remote = Command::new("docker")
+        .args([
+            "exec",
+            "--user",
+            "priv-testuser",
+            "-e",
+            &format!("HOME={PRIV_HOME}"),
+            DEVENV_CONTAINER,
+            "/usr/bin/git",
+            "-C",
+            &format!("{PRIV_HOME}/testrepo"),
+            "remote",
+            "set-url",
+            "origin",
+            HARNESS_GIT_URL,
+        ])
+        .output()
+        .expect("git remote set-url");
+    assert!(
+        set_remote.status.success(),
+        "remote set-url failed: {}",
+        String::from_utf8_lossy(&set_remote.stderr)
+    );
+
     // Make a commit as priv-testuser.
     let commit = Command::new("docker")
         .args([
