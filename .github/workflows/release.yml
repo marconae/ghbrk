@@ -18,6 +18,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   TARGET: x86_64-unknown-linux-gnu
+  PLATFORM: x86_64-linux
 
 jobs:
   release:
@@ -68,14 +69,14 @@ jobs:
         run: cargo about generate --config about.toml about.hbs --output-file LICENSE-THIRD-PARTY
 
       # Archive layout:
-      #   ghbrk-v1.0.1-x86_64-unknown-linux-gnu/
+      #   ghbrk-v1.0.3-x86_64-linux/
       #     ghbrk
       #     LICENSE
       #     LICENSE-THIRD-PARTY
       - name: Package tarball
         run: |
           TAG="${GITHUB_REF_NAME}"
-          DIRNAME="ghbrk-${TAG}-${TARGET}"
+          DIRNAME="ghbrk-${TAG}-${PLATFORM}"
           ARCHIVE="${DIRNAME}.tar.gz"
           mkdir -p "${DIRNAME}"
           cp "target/${TARGET}/release/ghbrk" "${DIRNAME}/ghbrk"

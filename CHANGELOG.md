@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.0.3]
+
+### Fixed
+- Release archive renamed from `ghbrk-<tag>-x86_64-unknown-linux-gnu.tar.gz` to `ghbrk-<tag>-x86_64-linux.tar.gz`.
+
 ## [1.0.2]
 
 ### Added
