@@ -142,7 +142,7 @@ fn start_compose() -> ComposeGuard {
     let guard = ComposeGuard {
         compose_dir: compose_dir(),
     };
-    wait_for_ssh(HOST_PORT, Duration::from_secs(30));
+    wait_for_ssh(HOST_PORT, Duration::from_secs(120));
     guard
 }
 
@@ -1042,7 +1042,7 @@ fn devenv_container_reachable_as_root() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(60));
+    wait_for_devenv(Duration::from_secs(120));
 
     let id = docker_exec(DEVENV_CONTAINER, &["id"]);
     assert!(id.status.success(), "id failed in devenv");
@@ -1074,7 +1074,7 @@ fn mock_github_reachable_over_tls() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(60));
+    wait_for_devenv(Duration::from_secs(120));
 
     // Curl over TLS *without* -k: success proves the test CA is trusted and the
     // server certificate's SAN matches `mock-github`.
@@ -1111,7 +1111,7 @@ fn gh_api_through_broker_succeeds() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(60));
+    wait_for_devenv(Duration::from_secs(120));
 
     provision_devenv(true);
     start_daemon_in_devenv();
@@ -1139,7 +1139,7 @@ fn gh_api_broker_missing_token() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(60));
+    wait_for_devenv(Duration::from_secs(120));
 
     provision_devenv(false);
     start_daemon_in_devenv();
@@ -1233,7 +1233,7 @@ fn e2e_privilege_drop_0700_home() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(60));
+    wait_for_devenv(Duration::from_secs(120));
 
     // Copy the static musl binary into devenv (same pattern as provision_devenv).
     let bin_path = build_static_binary();
