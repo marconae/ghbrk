@@ -62,7 +62,7 @@ jobs:
       # On a cache hit, cargo detects the binary already exists and skips
       # re-compilation (~3 min saved).
       - name: Install cargo-about
-        run: cargo install cargo-about --locked
+        run: cargo install cargo-about --locked --features=cli
 
       - name: Generate LICENSE-THIRD-PARTY
         run: cargo about generate --config about.toml about.hbs --output-file LICENSE-THIRD-PARTY
