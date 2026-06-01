@@ -18,12 +18,6 @@ accepted = [
     "CDLA-Permissive-2.0",
 ]
 
-# Exclude crates whose license expression is "NOASSERTION" (no detected
-# license) — these are typically proc-macro / build-script host crates that
-# are not shipped in the binary.
-filter-noassertion = true
-
 # Restrict the dependency graph to the release target so that Windows-only or
 # host-only build artefacts do not appear in the distributed license file.
 targets = ["x86_64-unknown-linux-gnu"]
-
