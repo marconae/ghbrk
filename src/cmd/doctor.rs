@@ -37,7 +37,7 @@ pub fn run() -> ExitCode {
 
     let (daemon_ok, creds_ok, cred_verdicts) =
         runtime.block_on(check_daemon_and_creds(&socket_path));
-    let policy_ok = check_policy(&policy_path);
+    let policy_verdict = check_policy(&policy_path);
 
     // Collect a verdict from every check before deciding the exit code. Each
     // check above already printed its own status line, so no check is
@@ -45,7 +45,7 @@ pub fn run() -> ExitCode {
     let mut verdicts = vec![
         verdict_from_success(daemon_ok, "daemon unreachable"),
         verdict_from_success(creds_ok, "credential check failed"),
-        verdict_from_success(policy_ok, "policy missing or invalid"),
+        policy_verdict,
         check_policy_permissions(&policy_path),
         check_config_dir_permissions(&config_dir),
         check_socket_permissions(&socket_path),
@@ -338,14 +338,14 @@ fn check_policy_permissions(path: &Path) -> PermissionVerdict {
             let verdict = PermissionVerdict::Warning(format!(
                 "user {POLICY_OWNER_USER} not found; cannot verify owner"
             ));
-            print_policy_permissions(&verdict);
+            print_permission_verdict("Policy permissions", &verdict);
             return verdict;
         }
         Err(err) => {
             let verdict = PermissionVerdict::Warning(format!(
                 "looking up user {POLICY_OWNER_USER} failed: {err}"
             ));
-            print_policy_permissions(&verdict);
+            print_permission_verdict("Policy permissions", &verdict);
             return verdict;
         }
     };
@@ -354,17 +354,8 @@ fn check_policy_permissions(path: &Path) -> PermissionVerdict {
         Ok(meta) => classify_policy_permissions(meta.uid(), expected_uid, meta.mode()),
         Err(err) => PermissionVerdict::Error(format!("cannot stat {}: {err}", path.display())),
     };
-    print_policy_permissions(&verdict);
+    print_permission_verdict("Policy permissions", &verdict);
     verdict
-}
-
-/// Print the single status line for a policy-permission verdict.
-fn print_policy_permissions(verdict: &PermissionVerdict) {
-    match verdict {
-        PermissionVerdict::Ok => println!("Policy permissions: OK"),
-        PermissionVerdict::Warning(detail) => println!("Policy permissions: WARNING {detail}"),
-        PermissionVerdict::Error(detail) => println!("Policy permissions: ERROR {detail}"),
-    }
 }
 
 /// Print a single `<label>: OK|WARNING <detail>|ERROR <detail>` status line.
@@ -500,29 +491,39 @@ fn check_socket_permissions(path: &Path) -> PermissionVerdict {
     verdict
 }
 
-/// Compute the policy file status as a `(success, message)` pair without
+/// Compute the policy file status as a `(verdict, message)` pair without
 /// printing. This pure helper enables unit-testing the message content.
-fn policy_status(path: &Path) -> (bool, String) {
+fn policy_status(path: &Path) -> (PermissionVerdict, String) {
     match std::fs::File::open(path) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            (false, format!("Policy: MISSING ({})", path.display()))
-        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => (
+            PermissionVerdict::Error("missing".to_string()),
+            format!("Policy: MISSING ({})", path.display()),
+        ),
+        Err(ref err) if err.kind() == io::ErrorKind::PermissionDenied => (
+            PermissionVerdict::Ok,
+            String::new(),
+        ),
         Err(err) => (
-            false,
+            PermissionVerdict::Error(err.to_string()),
             format!("Policy: ERROR ({}: {})", path.display(), err),
         ),
         Ok(file) => match Policy::from_reader(file) {
-            Ok(_) => (true, "Policy: OK".to_string()),
-            Err(err) => (false, format!("Policy: INVALID ({})", err)),
+            Ok(_) => (PermissionVerdict::Ok, "Policy: OK".to_string()),
+            Err(err) => (
+                PermissionVerdict::Error("invalid".to_string()),
+                format!("Policy: INVALID ({})", err),
+            ),
         },
     }
 }
 
-/// Read and parse the policy file. Prints one status line and returns success.
-fn check_policy(path: &Path) -> bool {
-    let (ok, msg) = policy_status(path);
-    println!("{msg}");
-    ok
+/// Read and parse the policy file. Prints one status line and returns the verdict.
+fn check_policy(path: &Path) -> PermissionVerdict {
+    let (verdict, msg) = policy_status(path);
+    if !msg.is_empty() {
+        println!("{msg}");
+    }
+    verdict
 }
 
 #[cfg(test)]
@@ -535,8 +536,9 @@ mod tests {
     fn policy_missing_file_reports_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.yaml");
-        let ok = check_policy(&path);
-        assert!(!ok);
+        let (verdict, msg) = policy_status(&path);
+        assert!(matches!(verdict, PermissionVerdict::Error(_)));
+        assert!(msg.contains("Policy: MISSING"), "{msg}");
     }
 
     #[test]
@@ -547,16 +549,17 @@ mod tests {
             "rules:\n  - user: \"*\"\n    org: acme\n    repo: \"*\"\n    operations: [push]\n    effect: allow"
         )
         .unwrap();
-        let ok = check_policy(f.path());
-        assert!(ok);
+        let (verdict, _msg) = policy_status(f.path());
+        assert_eq!(verdict, PermissionVerdict::Ok);
     }
 
     #[test]
     fn policy_invalid_yaml_reports_invalid() {
         let mut f = NamedTempFile::new().unwrap();
         writeln!(f, "not: valid: policy: content: !!").unwrap();
-        let ok = check_policy(f.path());
-        assert!(!ok);
+        let (verdict, msg) = policy_status(f.path());
+        assert!(matches!(verdict, PermissionVerdict::Error(_)));
+        assert!(msg.contains("INVALID"), "{msg}");
     }
 
     #[test]
@@ -814,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_permission_denied_returns_false() {
+    fn policy_permission_denied_is_silent() {
         use std::os::unix::fs::PermissionsExt;
 
         // Skip this test when running as root (root can read any file).
@@ -824,16 +827,12 @@ mod tests {
 
         let f = NamedTempFile::new().unwrap();
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
-        let (ok, msg) = policy_status(f.path());
-        assert!(!ok, "policy_status must return false for an unreadable file");
+        let (verdict, msg) = policy_status(f.path());
         assert!(
-            msg.contains("Policy: ERROR"),
-            "message must contain 'Policy: ERROR', got: {msg}"
+            matches!(verdict, PermissionVerdict::Ok),
+            "PermissionDenied should be Ok (silent), got: {verdict:?}"
         );
-        assert!(
-            !msg.contains("MISSING"),
-            "permission-denied must not say MISSING, got: {msg}"
-        );
+        assert!(msg.is_empty(), "message must be empty for PermissionDenied, got: {msg}");
     }
 
     #[tokio::test]
