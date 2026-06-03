@@ -499,10 +499,9 @@ fn policy_status(path: &Path) -> (PermissionVerdict, String) {
             PermissionVerdict::Error("missing".to_string()),
             format!("Policy: MISSING ({})", path.display()),
         ),
-        Err(ref err) if err.kind() == io::ErrorKind::PermissionDenied => (
-            PermissionVerdict::Ok,
-            String::new(),
-        ),
+        Err(ref err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            (PermissionVerdict::Ok, String::new())
+        }
         Err(err) => (
             PermissionVerdict::Error(err.to_string()),
             format!("Policy: ERROR ({}: {})", path.display(), err),
@@ -832,7 +831,10 @@ mod tests {
             matches!(verdict, PermissionVerdict::Ok),
             "PermissionDenied should be Ok (silent), got: {verdict:?}"
         );
-        assert!(msg.is_empty(), "message must be empty for PermissionDenied, got: {msg}");
+        assert!(
+            msg.is_empty(),
+            "message must be empty for PermissionDenied, got: {msg}"
+        );
     }
 
     #[tokio::test]
