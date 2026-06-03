@@ -1,6 +1,6 @@
 [package]
 name = "ghbrk"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 
@@ -27,6 +27,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tempfile = "3"
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
+arc-swap = "1"
 
 [dev-dependencies]
 tempfile = "3"

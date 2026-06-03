@@ -13,6 +13,7 @@ use std::os::unix::io::AsFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chown, getgrouplist, Gid, Group, Uid, User};
@@ -28,7 +29,9 @@ use crate::credentials::{
     SshAgentHandle,
 };
 use crate::executor::{stream_child, ChildSpec};
-use crate::policy::{Decision, Operation, Policy, Request as PolicyRequest};
+use crate::policy::{
+    Decision, Effect, Operation, OperationsSpec, Policy, Request as PolicyRequest, Rule,
+};
 use crate::protocol::{read_frame, write_frame, ProtocolError, Request, ServerFrame, Tool};
 use crate::resolver::{resolve_gh, resolve_git, ResolvedRequest, ResolverError, UrlScheme};
 
@@ -42,8 +45,12 @@ pub const CLIENT_GROUP_NAME: &str = "ghbrk-clients";
 pub struct BrokerConfig {
     /// Filesystem path the broker should bind.
     pub socket_path: PathBuf,
-    /// Loaded policy document.
-    pub policy: Policy,
+    /// Swappable policy handle. Each connection reads a snapshot; the allow
+    /// handler hot-reloads by storing a fresh `Arc<Policy>` into this handle.
+    pub policy: Arc<ArcSwap<Policy>>,
+    /// Path to the policy file on disk. The allow handler appends a rule here
+    /// and reloads it into the swappable handle.
+    pub policy_path: PathBuf,
     /// Audit logger; shared with the daemon process for flush-on-shutdown.
     pub audit_logger: Arc<AuditLogger>,
     /// Optional credential root override (for tests). When `None`, the
@@ -81,7 +88,8 @@ pub async fn run_broker(config: BrokerConfig) -> Result<(), BrokerError> {
     let mut term = signal(SignalKind::terminate()).map_err(BrokerError::Signal)?;
     let mut int_sig = signal(SignalKind::interrupt()).map_err(BrokerError::Signal)?;
 
-    let policy = Arc::new(config.policy);
+    let policy_handle = Arc::clone(&config.policy);
+    let policy_path = Arc::new(config.policy_path.clone());
     let credentials_root = config.credentials_root.clone().map(Arc::new);
 
     loop {
@@ -98,11 +106,24 @@ pub async fn run_broker(config: BrokerConfig) -> Result<(), BrokerError> {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _addr)) => {
-                        let policy = Arc::clone(&policy);
+                        // Snapshot the current policy at accept time. In-flight
+                        // connections keep their snapshot across a later swap.
+                        // The swappable handle and policy path travel alongside
+                        // so the allow handler can hot-reload after a write.
+                        let policy = policy_handle.load_full();
+                        let handle = Arc::clone(&policy_handle);
+                        let path = Arc::clone(&policy_path);
                         let audit = Arc::clone(&config.audit_logger);
                         let cred_root = credentials_root.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_connection(stream, policy, audit, cred_root).await {
+                            let ctx = ConnectionContext {
+                                policy,
+                                policy_handle: handle,
+                                policy_path: path,
+                                audit,
+                                credentials_root: cred_root,
+                            };
+                            if let Err(err) = handle_connection(stream, ctx).await {
                                 debug!(error = %err, "connection terminated with error");
                             }
                         });
@@ -127,13 +148,18 @@ pub async fn run_broker(config: BrokerConfig) -> Result<(), BrokerError> {
 }
 
 fn bind_listener(socket_path: &Path) -> Result<UnixListener, BrokerError> {
-    // Set umask to 0o117 so the socket is created with at most 0o660 from the
-    // start, closing the race window between bind and chmod.
+    // Set umask to 0o077 so the socket is created with no group/other access
+    // from the start, closing the race window between bind and chmod. The
+    // owner-execute bit is deliberately left unmasked: umask is process-wide,
+    // so during this brief window any file/directory another thread creates
+    // (notably temp dirs in the test suite) would otherwise lose its
+    // owner-traverse bit and become unusable. `apply_socket_permissions` widens
+    // the socket back to the intended 0o660 immediately after bind.
     //
     // umask is process-wide, so we hold a lock to prevent concurrent calls
     // (e.g. in tests) from observing the wrong umask while we bind.
     let _guard = UMASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let old_mask = umask(Mode::from_bits_truncate(0o117));
+    let old_mask = umask(Mode::from_bits_truncate(0o077));
     let result = UnixListener::bind(socket_path).map_err(|source| BrokerError::Bind {
         path: socket_path.to_path_buf(),
         source,
@@ -273,11 +299,21 @@ pub fn username_for_uid(uid: Uid) -> Option<String> {
     }
 }
 
-async fn handle_connection(
-    stream: UnixStream,
+/// Everything a single connection's handler needs from the daemon: the policy
+/// snapshot taken at accept time, the swappable handle and on-disk path used by
+/// the allow handler to hot-reload after a write, the audit logger, and the
+/// optional credentials-root override.
+struct ConnectionContext {
     policy: Arc<Policy>,
+    policy_handle: Arc<ArcSwap<Policy>>,
+    policy_path: Arc<PathBuf>,
     audit: Arc<AuditLogger>,
     credentials_root: Option<Arc<PathBuf>>,
+}
+
+async fn handle_connection(
+    stream: UnixStream,
+    ctx: ConnectionContext,
 ) -> Result<(), ConnectionError> {
     let identity = match peer_identity(&stream) {
         Some(identity) => identity,
@@ -301,26 +337,37 @@ async fn handle_connection(
         }
     };
 
-    process_request(
-        &mut stream,
-        request,
-        &identity,
-        &policy,
-        &audit,
-        credentials_root.as_deref().map(|a| a.as_path()),
-    )
-    .await
+    process_request(&mut stream, request, &identity, &ctx).await
 }
 
 async fn process_request(
     stream: &mut UnixStream,
     request: Request,
     identity: &PeerIdentity,
-    policy: &Policy,
-    audit: &Arc<AuditLogger>,
-    credentials_root: Option<&Path>,
+    ctx: &ConnectionContext,
 ) -> Result<(), ConnectionError> {
+    let policy = ctx.policy.as_ref();
+    let audit = &ctx.audit;
+    let credentials_root = ctx.credentials_root.as_deref().map(|a| a.as_path());
     let username = identity.username.as_str();
+
+    // The privileged `allow` mutation routes before resolve/policy: it neither
+    // resolves a repo URL nor consults the (read-path) policy. It validates the
+    // grant against the live role vocabulary, appends to the policy file, and
+    // hot-reloads the swappable handle.
+    if request.tool == Tool::Allow {
+        handle_allow(
+            stream,
+            &request.args,
+            identity,
+            &ctx.policy_handle,
+            ctx.policy_path.as_path(),
+            audit,
+        )
+        .await?;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
 
     // Query tools resolve + evaluate policy without executing anything.
     if request.tool == Tool::Explain {
@@ -375,6 +422,7 @@ async fn process_request(
         Tool::Explain | Tool::Policy => {
             unreachable!("query tools are handled before resolve_request")
         }
+        Tool::Allow => unreachable!("Tool::Allow is handled before resolve_request"),
     };
 
     // Resolve the request to (org, repo, branch, operation).
@@ -494,6 +542,330 @@ async fn process_request(
     Ok(())
 }
 
+/// Handle a privileged `allow` request: gate on root, parse and validate the
+/// grant against the live role vocabulary, append the rule to the policy file
+/// atomically, hot-reload the swappable handle, and stream a confirmation.
+///
+/// Generic over the writer so it can be driven by the broker's `UnixStream` in
+/// production and by an in-memory duplex stream in tests. Never reads from the
+/// stream and never spawns a subprocess. A returned `Ok(())` means every frame
+/// was written cleanly, regardless of whether the grant was allowed or denied.
+pub async fn handle_allow<W>(
+    writer: &mut W,
+    args: &[String],
+    identity: &PeerIdentity,
+    policy_handle: &Arc<ArcSwap<Policy>>,
+    policy_path: &Path,
+    audit: &Arc<AuditLogger>,
+) -> Result<(), ProtocolError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let username = identity.username.as_str();
+
+    // Privilege gate: only an effective UID 0 peer may mutate the policy. This
+    // keeps the trust boundary on the privileged daemon, per the mission's
+    // privilege-separation model.
+    if identity.uid != 0 {
+        let reason = "allow requires elevated privileges (root)".to_string();
+        audit_allow(audit, username, args, "", "", &deny(&reason)).await;
+        return send_denied(writer, &reason).await;
+    }
+
+    let request = match parse_allow_args(args, username) {
+        Ok(req) => req,
+        Err(reason) => {
+            audit_allow(audit, username, args, "", "", &deny(&reason)).await;
+            return send_denied(writer, &reason).await;
+        }
+    };
+
+    // Validate the grant against the live policy snapshot (role vocabulary)
+    // before touching the file. A reject leaves the policy file untouched.
+    let current = policy_handle.load_full();
+    if let Err(reason) = validate_grant(&request.operations, &current) {
+        audit_allow(
+            audit,
+            username,
+            args,
+            &request.org,
+            &request.repo,
+            &deny(&reason),
+        )
+        .await;
+        return send_denied(writer, &reason).await;
+    }
+
+    let rule = Rule {
+        user: request.target_user.clone(),
+        org: request.org.clone(),
+        repo: request.repo.clone(),
+        operations: request.operations.clone(),
+        branches: vec!["*".to_string()],
+        effect: Effect::Allow,
+    };
+
+    // Append + atomic rename happen on a blocking thread; the file work is
+    // synchronous and must not stall the async executor under load.
+    let path = policy_path.to_path_buf();
+    let append_result =
+        tokio::task::spawn_blocking(move || append_rule_atomically(&path, &rule)).await;
+
+    let new_text = match append_result {
+        Ok(Ok(text)) => text,
+        Ok(Err(err)) => {
+            let reason = format!("allow: failed to update policy file: {err}");
+            audit_allow(
+                audit,
+                username,
+                args,
+                &request.org,
+                &request.repo,
+                &deny(&reason),
+            )
+            .await;
+            return send_denied(writer, &reason).await;
+        }
+        Err(err) => {
+            let reason = format!("allow: policy write task failed: {err}");
+            audit_allow(
+                audit,
+                username,
+                args,
+                &request.org,
+                &request.repo,
+                &deny(&reason),
+            )
+            .await;
+            return send_denied(writer, &reason).await;
+        }
+    };
+
+    // Reload from the freshly written file so the swapped handle matches disk
+    // exactly, then publish it. A parse failure here means the file we just
+    // wrote is somehow invalid; surface it rather than swapping in garbage.
+    match Policy::from_yaml(&new_text) {
+        Ok(reloaded) => policy_handle.store(Arc::new(reloaded)),
+        Err(err) => {
+            let reason = format!("allow: wrote policy but failed to reload it: {err}");
+            audit_allow(
+                audit,
+                username,
+                args,
+                &request.org,
+                &request.repo,
+                &deny(&reason),
+            )
+            .await;
+            return send_denied(writer, &reason).await;
+        }
+    }
+
+    audit_allow(
+        audit,
+        username,
+        args,
+        &request.org,
+        &request.repo,
+        &AuditDecision::Allow,
+    )
+    .await;
+
+    let confirmation = format!(
+        "granted {} on {}/{} to {}\n",
+        describe_operations(&request.operations),
+        request.org,
+        request.repo,
+        request.target_user
+    );
+    write_frame(
+        writer,
+        &ServerFrame::StdoutChunk {
+            data: confirmation.into_bytes(),
+        },
+    )
+    .await?;
+    write_frame(writer, &ServerFrame::Exit { code: 0 }).await
+}
+
+/// A parsed allow request: the target repo, the user the grant is for, and the
+/// operations spec (a role name or an explicit operation list).
+struct AllowRequest {
+    org: String,
+    repo: String,
+    target_user: String,
+    operations: OperationsSpec,
+}
+
+/// Parse `org/repo`, an optional `--user <name>` flag (defaulting the target to
+/// the caller), and the operand list into an [`AllowRequest`]. Returns a
+/// human-readable deny reason on any malformed input.
+fn parse_allow_args(args: &[String], caller: &str) -> Result<AllowRequest, String> {
+    let spec = args
+        .first()
+        .ok_or_else(|| "allow: missing repo specifier; expected org/repo".to_string())?;
+    let (org, repo) = parse_repo_spec(spec)
+        .ok_or_else(|| format!("allow: invalid repo specifier '{spec}'; expected org/repo"))?;
+
+    let mut target_user = caller.to_string();
+    let mut operands: Vec<&str> = Vec::new();
+    let mut rest = args[1..].iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--user" {
+            let value = rest
+                .next()
+                .ok_or_else(|| "allow: --user requires a username".to_string())?;
+            if value.is_empty() {
+                return Err("allow: --user requires a non-empty username".to_string());
+            }
+            target_user = value.clone();
+        } else {
+            operands.push(arg.as_str());
+        }
+    }
+
+    if operands.is_empty() {
+        return Err("allow: no operations or role specified".to_string());
+    }
+
+    let operations = parse_operations_spec(&operands)?;
+    Ok(AllowRequest {
+        org,
+        repo,
+        target_user,
+        operations,
+    })
+}
+
+/// Turn the operand list into an [`OperationsSpec`]. A single operand that
+/// names a known role becomes `Role`; otherwise every operand must parse as a
+/// concrete operation and the result is a `List`. Returns a deny reason naming
+/// the offending operand when it is neither a known role nor a known operation.
+fn parse_operations_spec(operands: &[&str]) -> Result<OperationsSpec, String> {
+    if operands.len() == 1 {
+        let only = operands[0];
+        if is_known_role(only) {
+            return Ok(OperationsSpec::Role(only.to_string()));
+        }
+        if let Some(op) = Operation::parse(only) {
+            return Ok(OperationsSpec::List(vec![op]));
+        }
+        return Err(format!(
+            "allow: '{only}' is neither a known operation nor a known role"
+        ));
+    }
+
+    let mut ops = Vec::with_capacity(operands.len());
+    for operand in operands {
+        match Operation::parse(operand) {
+            Some(op) => ops.push(op),
+            None => {
+                return Err(format!("allow: unknown operation '{operand}'"));
+            }
+        }
+    }
+    Ok(OperationsSpec::List(ops))
+}
+
+/// True when `name` resolves as a role in the built-in vocabulary. A standalone
+/// helper backed by an empty policy: it covers the built-ins (`read-only`,
+/// `write`, `admin`) that exist without declaration, which is what the operand
+/// classifier needs before the live-policy validation step.
+fn is_known_role(name: &str) -> bool {
+    Operation::parse(name).is_none() && BUILTIN_ROLE_NAMES.contains(&name)
+}
+
+/// Built-in role names available without declaration. Mirrors `policy.rs`.
+const BUILTIN_ROLE_NAMES: &[&str] = &["read-only", "write", "admin"];
+
+/// Validate the parsed operations against the live policy. For a role
+/// reference, the role must resolve in the current policy (user-defined roles
+/// shadow built-ins). For an explicit list, parsing already guaranteed every
+/// operation is in the vocabulary.
+fn validate_grant(operations: &OperationsSpec, policy: &Policy) -> Result<(), String> {
+    match operations {
+        OperationsSpec::Role(name) => {
+            if policy.resolve_role(name).is_none() {
+                return Err(format!("allow: unknown role '{name}'"));
+            }
+            Ok(())
+        }
+        OperationsSpec::List(_) => Ok(()),
+    }
+}
+
+/// Read the current policy file, append `rule`, and write the re-serialised
+/// document back atomically via a temp file in the same directory plus a
+/// rename. Returns the serialised text on success. Never partially writes the
+/// destination: a crash mid-write leaves the original file intact.
+fn append_rule_atomically(policy_path: &Path, rule: &Rule) -> io::Result<String> {
+    let text = std::fs::read_to_string(policy_path)?;
+    let mut policy =
+        Policy::from_yaml(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    policy.rules.push(rule.clone());
+    let serialised = serde_yaml::to_string(&policy)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let dir = policy_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".policy-")
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    {
+        use std::io::Write as _;
+        tmp.as_file_mut()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        tmp.write_all(serialised.as_bytes())?;
+        tmp.as_file_mut().sync_all()?;
+    }
+    // Atomic replace on the same filesystem.
+    tmp.persist(policy_path)
+        .map_err(|e| io::Error::other(e.error))?;
+    Ok(serialised)
+}
+
+/// Human-readable summary of an operations spec for the confirmation line.
+fn describe_operations(operations: &OperationsSpec) -> String {
+    match operations {
+        OperationsSpec::Role(name) => format!("role '{name}'"),
+        OperationsSpec::List(ops) => {
+            let names: Vec<&str> = ops.iter().map(operation_name).collect();
+            names.join(", ")
+        }
+    }
+}
+
+fn deny(reason: &str) -> AuditDecision {
+    AuditDecision::Deny {
+        reason: reason.to_string(),
+    }
+}
+
+/// Write an audit record for an allow request outcome.
+async fn audit_allow(
+    audit: &Arc<AuditLogger>,
+    user: &str,
+    args: &[String],
+    org: &str,
+    repo: &str,
+    decision: &AuditDecision,
+) {
+    write_audit(
+        audit,
+        AuditEntry {
+            user,
+            tool: "allow",
+            args,
+            org,
+            repo,
+            branch: None,
+            operation: "allow",
+            decision: decision.clone(),
+        },
+    )
+    .await;
+}
+
 /// Returns `true` when a `gh` invocation is a broker-mediated operation
 /// (subject to resolve + policy). When `false`, the broker treats it as a
 /// passthrough: it still injects `GH_TOKEN` but bypasses resolve and policy.
@@ -584,6 +956,12 @@ async fn handle_check_request(
     if !output.is_empty() {
         write_frame(stream, &ServerFrame::StdoutChunk { data: output }).await?;
     }
+
+    // Report observed owner/mode of the credential dir and files. The caller
+    // cannot stat these paths (broker-owned, mode 0700), so it relies on the
+    // broker to proxy the stat and runs the permission classifier client-side.
+    let audit = crate::health_check::audit_credential_paths(&creds_root, username);
+    write_frame(stream, &ServerFrame::CredentialAudit { audit }).await?;
 
     let code = if all_ok { 0 } else { 1 };
     write_frame(stream, &ServerFrame::Exit { code }).await?;
@@ -880,6 +1258,7 @@ fn resolve_request(request: &Request) -> Result<ResolvedRequest, ResolverError> 
         Tool::Explain | Tool::Policy => {
             unreachable!("query tools are handled before resolve_request")
         }
+        Tool::Allow => unreachable!("Tool::Allow is handled before resolve_request"),
     }
 }
 
@@ -923,6 +1302,7 @@ async fn build_env(
         },
         Tool::Check => unreachable!("Tool::Check is handled before build_env"),
         Tool::Explain | Tool::Policy => unreachable!("query tools are handled before build_env"),
+        Tool::Allow => unreachable!("Tool::Allow is handled before build_env"),
     }
 }
 

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use ghbrk::audit::AuditLogger;
 use ghbrk::broker::{run_broker, BrokerConfig};
 use ghbrk::policy::Policy;
@@ -29,6 +30,9 @@ struct Harness {
     socket_path: PathBuf,
     audit_path: PathBuf,
     handle: tokio::task::JoinHandle<()>,
+    /// A clone of the broker's swappable policy handle. Tests use this seam to
+    /// hot-reload the policy without touching the file system.
+    policy: Arc<ArcSwap<Policy>>,
 }
 
 impl Harness {
@@ -44,10 +48,13 @@ impl Harness {
         let tmp = tempfile::tempdir().unwrap();
         let socket_path = tmp.path().join("broker.sock");
         let audit_path = tmp.path().join("audit.log");
+        let policy_path = tmp.path().join("policy.yaml");
         let logger = Arc::new(AuditLogger::new(&audit_path).unwrap());
+        let policy_handle = Arc::new(ArcSwap::from_pointee(policy));
         let config = BrokerConfig {
             socket_path: socket_path.clone(),
-            policy,
+            policy: Arc::clone(&policy_handle),
+            policy_path,
             audit_logger: logger,
             credentials_root,
         };
@@ -70,7 +77,14 @@ impl Harness {
             socket_path,
             audit_path,
             handle,
+            policy: policy_handle,
         }
+    }
+
+    /// Hot-reload the broker's policy via the swappable handle. Connections
+    /// accepted after this call observe the new policy snapshot.
+    fn swap_policy(&self, policy: Policy) {
+        self.policy.store(Arc::new(policy));
     }
 }
 
@@ -89,6 +103,104 @@ async fn collect_until_exit(stream: &mut UnixStream) -> (String, i32) {
             other => panic!("unexpected frame before Exit: {other:?}"),
         }
     }
+}
+
+/// Open a fresh connection, send a `Tool::Policy` query for `repo_spec`, and
+/// return the operations listed in the report's allowed section. Each call is a
+/// brand-new connection so it observes the policy snapshot current at accept
+/// time.
+async fn query_allowed_ops(socket_path: &std::path::Path, repo_spec: &str) -> String {
+    let mut stream = UnixStream::connect(socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Policy,
+        args: vec![repo_spec.into()],
+        cwd: PathBuf::from("/"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let (report, _code) = collect_until_exit(&mut stream).await;
+    // The report has an "allowed operations:" section followed by a
+    // "forbidden operations" section; isolate the allowed slice so an op
+    // appearing in the forbidden list never reads as allowed.
+    report
+        .split("allowed operations:")
+        .nth(1)
+        .unwrap_or("")
+        .split("forbidden operations")
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[tokio::test]
+async fn policy_reload_visible_to_new_connections() {
+    // Start under a deny-all policy: a policy query for acme/web lists every
+    // operation as forbidden, so `push` is not in the allowed section.
+    let h = Harness::start_with(dummy_policy(), None).await;
+    let before = query_allowed_ops(&h.socket_path, "acme/web").await;
+    assert!(
+        !before.contains("push"),
+        "deny-all policy unexpectedly allowed push before reload:\n{before}"
+    );
+
+    // Hot-swap to a policy that allows push for acme/web via the test seam.
+    let allow_push = Policy::from_yaml(
+        "rules:\n  \
+         - user: \"*\"\n    \
+           org: \"acme\"\n    \
+           repo: \"web\"\n    \
+           branches: [\"*\"]\n    \
+           operations: [push]\n    \
+           effect: allow\n",
+    )
+    .unwrap();
+    h.swap_policy(allow_push);
+
+    // A brand-new connection must observe the swapped policy: push is now
+    // listed in the allowed-operations section.
+    let after = query_allowed_ops(&h.socket_path, "acme/web").await;
+    assert!(
+        after.contains("push"),
+        "new connection did not observe the reloaded policy; allowed ops:\n{after}"
+    );
+
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn allow_request_routed_and_denied_for_non_root_peer() {
+    // The broker routes Tool::Allow to its allow handler before resolve/policy.
+    // The test runner is non-root, so the privilege gate must deny it over the
+    // wire. (Root-peer append/reload is covered by the handle_allow seam in
+    // tests/allow_command.rs.)
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("running as root; skipping non-root allow-deny assertion");
+        return;
+    }
+    let h = Harness::start().await;
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Allow,
+        args: vec!["acme/web".into(), "write".into()],
+        cwd: PathBuf::from("/"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let frame: ServerFrame = read_frame(&mut stream).await.unwrap();
+    match frame {
+        ServerFrame::Denied { reason } => {
+            assert!(
+                reason.to_lowercase().contains("privilege")
+                    || reason.to_lowercase().contains("root"),
+                "deny reason should mention privilege: {reason}"
+            );
+        }
+        other => panic!("expected Denied for non-root allow, got {other:?}"),
+    }
+    assert!(!h.handle.is_finished(), "broker died handling allow");
+    h.handle.abort();
 }
 
 #[tokio::test]

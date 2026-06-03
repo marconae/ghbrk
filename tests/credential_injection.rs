@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use ghbrk::audit::AuditLogger;
 use ghbrk::broker::{run_broker, BrokerConfig};
 use ghbrk::policy::Policy;
@@ -91,10 +92,12 @@ async fn gh_api_receives_gh_token() {
     let run_dir = TempDir::new().unwrap();
     let socket_path = run_dir.path().join("broker.sock");
     let audit_path = run_dir.path().join("audit.log");
+    let policy_path = run_dir.path().join("policy.yaml");
     let logger = Arc::new(AuditLogger::new(&audit_path).unwrap());
     let config = BrokerConfig {
         socket_path: socket_path.clone(),
-        policy: gh_api_policy(&user),
+        policy: Arc::new(ArcSwap::from_pointee(gh_api_policy(&user))),
+        policy_path,
         audit_logger: logger,
         credentials_root: Some(creds_root.path().to_path_buf()),
     };
@@ -149,11 +152,15 @@ async fn gh_passthrough_repo_view_receives_token() {
     let run_dir = TempDir::new().unwrap();
     let socket_path = run_dir.path().join("broker.sock");
     let audit_path = run_dir.path().join("audit.log");
+    let policy_path = run_dir.path().join("policy.yaml");
     let logger = Arc::new(AuditLogger::new(&audit_path).unwrap());
     let config = BrokerConfig {
         socket_path: socket_path.clone(),
         // Empty policy: passthrough must bypass policy entirely.
-        policy: Policy::from_yaml("rules: []").unwrap(),
+        policy: Arc::new(ArcSwap::from_pointee(
+            Policy::from_yaml("rules: []").unwrap(),
+        )),
+        policy_path,
         audit_logger: logger,
         credentials_root: Some(creds_root.path().to_path_buf()),
     };
@@ -284,10 +291,12 @@ async fn ssh_op_sets_ssh_auth_sock_not_git_ssh_command() {
     let run_dir = TempDir::new().unwrap();
     let socket_path = run_dir.path().join("broker.sock");
     let audit_path = run_dir.path().join("audit.log");
+    let policy_path = run_dir.path().join("policy.yaml");
     let logger = Arc::new(AuditLogger::new(&audit_path).unwrap());
     let config = BrokerConfig {
         socket_path: socket_path.clone(),
-        policy: git_ssh_policy(&user),
+        policy: Arc::new(ArcSwap::from_pointee(git_ssh_policy(&user))),
+        policy_path,
         audit_logger: logger,
         credentials_root: Some(creds_root.path().to_path_buf()),
     };

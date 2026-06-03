@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::io;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -56,6 +58,12 @@ impl Operation {
         }
     }
 
+    /// Parse a snake_case operation tag into its variant, or `None` when the
+    /// tag is not part of the policy vocabulary. The inverse of [`tag`].
+    pub fn parse(tag: &str) -> Option<Operation> {
+        Operation::from_tag(tag)
+    }
+
     fn from_tag(tag: &str) -> Option<Operation> {
         let op = match tag {
             "push" => Operation::Push,
@@ -100,6 +108,93 @@ impl<'de> Deserialize<'de> for Operation {
     }
 }
 
+/// How a rule names the operations it covers.
+///
+/// Accepts either a bare role name (`operations: write`) or an inline list
+/// (`operations: [push, fetch]`). Role names are stored verbatim and resolved
+/// against the policy's role table at evaluation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationsSpec {
+    Role(String),
+    List(Vec<Operation>),
+}
+
+impl Serialize for OperationsSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OperationsSpec::Role(name) => serializer.serialize_str(name),
+            OperationsSpec::List(operations) => operations.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OperationsSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SpecVisitor {
+            type Value = OperationsSpec;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a role name string or a list of operations")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(OperationsSpec::Role(value.to_string()))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut operations = Vec::new();
+                while let Some(operation) = seq.next_element::<Operation>()? {
+                    operations.push(operation);
+                }
+                Ok(OperationsSpec::List(operations))
+            }
+        }
+
+        deserializer.deserialize_any(SpecVisitor)
+    }
+}
+
+/// Built-in role definitions, available without being declared in `roles:`.
+/// User entries in `roles:` shadow these by name.
+fn builtin_roles() -> &'static HashMap<&'static str, Vec<Operation>> {
+    static BUILTINS: OnceLock<HashMap<&'static str, Vec<Operation>>> = OnceLock::new();
+    BUILTINS.get_or_init(|| {
+        let read_only = vec![
+            Operation::Fetch,
+            Operation::Clone,
+            Operation::Pull,
+            Operation::PrReview,
+            Operation::GhApiRead {
+                path: String::new(),
+            },
+        ];
+        let mut write = read_only.clone();
+        write.extend([
+            Operation::Push,
+            Operation::PrOpen,
+            Operation::PrComment,
+            Operation::PrClose,
+            Operation::PrMerge,
+            Operation::IssueOpen,
+            Operation::IssueComment,
+            Operation::IssueClose,
+        ]);
+        let mut admin = write.clone();
+        admin.push(Operation::ReleaseCreate);
+
+        let mut roles = HashMap::new();
+        roles.insert("read-only", read_only);
+        roles.insert("write", write);
+        roles.insert("admin", admin);
+        roles
+    })
+}
+
 /// Allow or deny effect of a matched rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,7 +210,7 @@ pub struct Rule {
     pub user: String,
     pub org: String,
     pub repo: String,
-    pub operations: Vec<Operation>,
+    pub operations: OperationsSpec,
     #[serde(default = "default_branches")]
     pub branches: Vec<String>,
     pub effect: Effect,
@@ -130,6 +225,9 @@ fn default_branches() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub rules: Vec<Rule>,
+    /// User-defined roles. Entries shadow built-in roles of the same name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub roles: HashMap<String, Vec<Operation>>,
 }
 
 /// Inputs the engine matches against.
@@ -158,6 +256,10 @@ pub enum PolicyError {
     Yaml(#[from] serde_yaml::Error),
     #[error("rule {index} has empty operations list")]
     EmptyOperations { index: usize },
+    #[error("rule {index} references unknown role '{name}'")]
+    UnknownRole { index: usize, name: String },
+    #[error("role '{name}' has an empty operation set")]
+    EmptyRole { name: String },
     #[error("rule {index} has invalid branch glob '{pattern}': {source}")]
     InvalidBranchGlob {
         index: usize,
@@ -183,9 +285,26 @@ impl Policy {
     }
 
     fn validate(&self) -> Result<(), PolicyError> {
+        for (name, operations) in &self.roles {
+            if operations.is_empty() {
+                return Err(PolicyError::EmptyRole { name: name.clone() });
+            }
+        }
         for (index, rule) in self.rules.iter().enumerate() {
-            if rule.operations.is_empty() {
-                return Err(PolicyError::EmptyOperations { index });
+            match &rule.operations {
+                OperationsSpec::List(operations) => {
+                    if operations.is_empty() {
+                        return Err(PolicyError::EmptyOperations { index });
+                    }
+                }
+                OperationsSpec::Role(name) => {
+                    if self.resolve_role(name).is_none() {
+                        return Err(PolicyError::UnknownRole {
+                            index,
+                            name: name.clone(),
+                        });
+                    }
+                }
             }
             for pattern in &rule.branches {
                 glob::Pattern::new(pattern).map_err(|source| PolicyError::InvalidBranchGlob {
@@ -198,11 +317,33 @@ impl Policy {
         Ok(())
     }
 
+    /// Resolve a role name to its operation set, preferring user-defined roles
+    /// over built-ins. Returns `None` for an unknown role.
+    pub fn resolve_role(&self, name: &str) -> Option<&[Operation]> {
+        if let Some(operations) = self.roles.get(name) {
+            return Some(operations.as_slice());
+        }
+        builtin_roles().get(name).map(Vec::as_slice)
+    }
+
+    /// The concrete operations a rule covers, resolving any role reference
+    /// against this policy's role table. `None` only for an unresolved role,
+    /// which a validated policy never contains.
+    fn rule_operations<'a>(&'a self, rule: &'a Rule) -> Option<&'a [Operation]> {
+        match &rule.operations {
+            OperationsSpec::List(operations) => Some(operations.as_slice()),
+            OperationsSpec::Role(name) => self.resolve_role(name),
+        }
+    }
+
     /// Evaluate `request` against the rules in document order, returning the
     /// first matching rule's effect, or default-deny when none match.
     pub fn evaluate(&self, request: &Request<'_>) -> Decision {
         for rule in &self.rules {
-            if rule_matches(rule, request) {
+            let Some(operations) = self.rule_operations(rule) else {
+                continue;
+            };
+            if rule_matches(rule, operations, request) {
                 return match rule.effect {
                     Effect::Allow => Decision::Allow,
                     Effect::Deny => Decision::Deny {
@@ -221,7 +362,7 @@ fn field_matches(pattern: &str, value: &str) -> bool {
     pattern == WILDCARD || pattern == value
 }
 
-fn rule_matches(rule: &Rule, request: &Request<'_>) -> bool {
+fn rule_matches(rule: &Rule, operations: &[Operation], request: &Request<'_>) -> bool {
     if !field_matches(&rule.user, request.user) {
         return false;
     }
@@ -231,11 +372,7 @@ fn rule_matches(rule: &Rule, request: &Request<'_>) -> bool {
     if !field_matches(&rule.repo, request.repo) {
         return false;
     }
-    if !rule
-        .operations
-        .iter()
-        .any(|op| op.same_kind(&request.operation))
-    {
+    if !operations.iter().any(|op| op.same_kind(&request.operation)) {
         return false;
     }
     if !branch_matches(&rule.branches, request) {
@@ -544,7 +681,12 @@ rules:
 "#,
         )
         .unwrap();
-        assert_eq!(policy.rules[0].operations.len(), 1);
+        assert_eq!(
+            policy.rules[0].operations,
+            OperationsSpec::List(vec![Operation::GhApiRead {
+                path: String::new()
+            }])
+        );
     }
 
     #[test]
@@ -627,7 +769,10 @@ rules:
 "#,
         )
         .unwrap();
-        assert_eq!(policy.rules[0].operations, vec![Operation::Pull]);
+        assert_eq!(
+            policy.rules[0].operations,
+            OperationsSpec::List(vec![Operation::Pull])
+        );
     }
 
     #[test]
@@ -664,6 +809,242 @@ rules:
             pull_policy.evaluate(&req("alice", "acme", "web", Operation::Pull, None)),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn builtin_roles_available_without_declaration() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: read-only
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Fetch, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn rule_matches_via_builtin_role() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: write
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::PrOpen, None)),
+            Decision::Allow
+        );
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseCreate, None)),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn role_resolved_at_eval_time() {
+        let policy = Policy::from_yaml(
+            r#"
+roles:
+  write: [release_create]
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: write
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseCreate, None)),
+            Decision::Allow
+        );
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Push, Some("main"))),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn user_defined_role_matches() {
+        let policy = Policy::from_yaml(
+            r#"
+roles:
+  reviewer: [pr_review, pr_comment]
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: reviewer
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::PrReview, None)),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::PrComment, None)),
+            Decision::Allow
+        );
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::PrMerge, None)),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn user_role_overrides_builtin() {
+        let policy = Policy::from_yaml(
+            r#"
+roles:
+  read-only: [pr_review]
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: read-only
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Fetch, None)),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::PrReview, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn unknown_role_reference_rejected() {
+        let result = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: maintainer
+    effect: allow
+"#,
+        );
+        let err = result.expect_err("expected load failure");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("maintainer"),
+            "error should name the role: {msg}"
+        );
+    }
+
+    #[test]
+    fn role_with_unknown_operation_rejected() {
+        let result = Policy::from_yaml(
+            r#"
+roles:
+  bogus: [frobnicate]
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: bogus
+    effect: allow
+"#,
+        );
+        let err = result.expect_err("expected load failure");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("frobnicate"),
+            "error should name the operation: {msg}"
+        );
+    }
+
+    #[test]
+    fn empty_role_rejected() {
+        let result = Policy::from_yaml(
+            r#"
+roles:
+  empty: []
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: empty
+    effect: allow
+"#,
+        );
+        let err = result.expect_err("expected load failure");
+        let msg = format!("{err}");
+        assert!(msg.contains("empty"), "error should name the role: {msg}");
+    }
+
+    #[test]
+    fn inline_operations_list_still_matches() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [push, fetch]
+    branches: ["*"]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Push, Some("main"))),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Fetch, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn role_push_respects_branch_globs() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: write
+    branches: ["release/*"]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req(
+                "alice",
+                "acme",
+                "web",
+                Operation::Push,
+                Some("release/v1.2")
+            )),
+            Decision::Allow
+        );
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::Push, Some("main"))),
+            Decision::Deny { .. }
+        ));
     }
 
     #[test]

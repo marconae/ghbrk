@@ -125,6 +125,7 @@ where
                     return GATEWAY_ERROR_EXIT;
                 }
             }
+            Ok(ServerFrame::CredentialAudit { .. }) => {}
             Ok(ServerFrame::Exit { code }) => {
                 let _ = stdout.flush().await;
                 let _ = stderr.flush().await;

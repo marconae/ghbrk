@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 use std::time::Duration;
 
 use ghbrk::audit::AuditLogger;
@@ -32,6 +34,7 @@ fn start_broker(policy: Policy) -> BrokerHandle {
     let tmp = tempfile::tempdir().unwrap();
     let socket_path = tmp.path().join("broker.sock");
     let audit_path = tmp.path().join("audit.log");
+    let policy_path = tmp.path().join("policy.yaml");
     let sp = socket_path.clone();
 
     let thread = std::thread::spawn(move || {
@@ -39,7 +42,8 @@ fn start_broker(policy: Policy) -> BrokerHandle {
         let logger = Arc::new(AuditLogger::new(&audit_path).unwrap());
         let config = BrokerConfig {
             socket_path: sp.clone(),
-            policy,
+            policy: Arc::new(ArcSwap::from_pointee(policy)),
+            policy_path,
             audit_logger: logger,
             credentials_root: None,
         };

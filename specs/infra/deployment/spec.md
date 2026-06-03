@@ -90,3 +90,27 @@ With executor privilege drop in place, setup no longer requires loosening home d
 * *AND* the brokered operation MUST succeed because the daemon drops to the requesting user's UID/GID before spawning the child, so the child traverses the home directory with the user's own permissions
 * *AND* the install script MUST NOT add any new step to grant the `ghbrk` system user access to user home directories
 
+### Scenario: install.sh creates policy.yaml with correct mode
+
+* *GIVEN* a fresh Linux host where the `ghbrk` system user and `ghbrk-clients` group have been created by `install.sh`
+* *WHEN* `install.sh` reaches the policy-file step and `/etc/ghbrk/policy.yaml` does not yet exist
+* *THEN* the script MUST create `/etc/ghbrk/policy.yaml` with owner `ghbrk:ghbrk`
+* *AND* the script MUST set its mode to `0600`
+* *AND* the script MUST NOT make the file readable or writable by group or other
+
+### Scenario: install.sh preserves an existing policy.yaml content but corrects its mode
+
+* *GIVEN* a host where `/etc/ghbrk/policy.yaml` already exists with operator-authored rules
+* *WHEN* the operator runs `install.sh` a second time
+* *THEN* the script MUST NOT overwrite the existing policy content
+* *AND* the script MUST re-assert owner `ghbrk:ghbrk` and mode `0600` on the existing file
+* *AND* the script MUST exit zero
+
+### Scenario: non-root user cannot directly write policy.yaml
+
+* *GIVEN* `/etc/ghbrk/policy.yaml` exists with owner `ghbrk:ghbrk` and mode `0600`
+* *AND* a user who is a member of `ghbrk-clients` but is neither `root` nor the `ghbrk` system user
+* *WHEN* that user attempts an OS-level write to the file, e.g. `echo '' >> /etc/ghbrk/policy.yaml`
+* *THEN* the operating system MUST reject the write with a permission-denied error
+* *AND* the file content MUST remain unchanged
+

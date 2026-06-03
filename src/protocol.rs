@@ -17,6 +17,7 @@ pub enum Tool {
     Check,
     Explain,
     Policy,
+    Allow,
 }
 
 /// Request frame sent by the shim to the broker.
@@ -33,6 +34,38 @@ pub struct Request {
     pub head_branch: Option<String>,
 }
 
+/// Observed owner and mode of a single credential path, stat'd by the broker on
+/// behalf of a caller who cannot stat it directly (paths under the broker's
+/// credentials root are unreadable by the calling user).
+///
+/// New fields carry `#[serde(default)]` so a client built before they existed
+/// can still deserialize the frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathAudit {
+    /// Human-readable label for the path (e.g. `Credential dir`, `SSH key`).
+    pub label: String,
+    /// Absolute path the broker stat'd.
+    pub path: PathBuf,
+    /// Whether the path exists.
+    pub present: bool,
+    /// Owner uid observed by the broker. Meaningless when `present` is false.
+    #[serde(default)]
+    pub observed_owner_uid: u32,
+    /// Permission bits (`st_mode & 0o777`) observed by the broker. Meaningless
+    /// when `present` is false.
+    #[serde(default)]
+    pub observed_mode: u32,
+}
+
+/// Owner/mode audit of the caller's credential directory and credential files,
+/// produced by the broker so the `doctor` client can run the tiered permission
+/// classifier against paths it cannot stat itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CredentialAudit {
+    #[serde(default)]
+    pub entries: Vec<PathAudit>,
+}
+
 /// Frames the broker emits back to the shim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -41,6 +74,7 @@ pub enum ServerFrame {
     StderrChunk { data: Vec<u8> },
     Exit { code: i32 },
     Denied { reason: String },
+    CredentialAudit { audit: CredentialAudit },
 }
 
 /// Errors produced when reading/writing protocol frames.
@@ -305,6 +339,63 @@ mod tests {
         let mut cursor = Cursor::new(buf);
         let result: Result<ServerFrame, _> = read_frame(&mut cursor).await;
         assert!(matches!(result, Err(ProtocolError::InvalidJson(_))));
+    }
+
+    #[tokio::test]
+    async fn allow_request_round_trips_with_allow_discriminant() {
+        let req = Request {
+            tool: Tool::Allow,
+            args: vec!["acme/web".into(), "write".into()],
+            cwd: PathBuf::from("/work/repo"),
+            remote_url: None,
+            head_branch: None,
+        };
+        let decoded: Request = round_trip(&req).await;
+        assert_eq!(decoded, req);
+        assert_eq!(decoded.tool, Tool::Allow);
+        let json = serde_json::to_string(&Tool::Allow).unwrap();
+        assert_eq!(json, r#""allow""#);
+    }
+
+    #[tokio::test]
+    async fn credential_audit_frame_round_trips() {
+        let frame = ServerFrame::CredentialAudit {
+            audit: CredentialAudit {
+                entries: vec![
+                    PathAudit {
+                        label: "Credential dir".into(),
+                        path: PathBuf::from("/var/lib/ghbrk/credentials/alice"),
+                        present: true,
+                        observed_owner_uid: 4242,
+                        observed_mode: 0o700,
+                    },
+                    PathAudit {
+                        label: "Token".into(),
+                        path: PathBuf::from("/var/lib/ghbrk/credentials/alice/token"),
+                        present: false,
+                        observed_owner_uid: 0,
+                        observed_mode: 0,
+                    },
+                ],
+            },
+        };
+        let decoded: ServerFrame = round_trip(&frame).await;
+        assert_eq!(decoded, frame);
+    }
+
+    #[tokio::test]
+    async fn path_audit_without_owner_mode_fields_defaults_to_zero() {
+        let legacy_json = r#"{"label":"Token","path":"/x","present":false}"#;
+        let decoded: PathAudit = serde_json::from_str(legacy_json).expect("legacy decode");
+        assert_eq!(decoded.observed_owner_uid, 0);
+        assert_eq!(decoded.observed_mode, 0);
+        assert!(!decoded.present);
+    }
+
+    #[tokio::test]
+    async fn credential_audit_without_entries_defaults_to_empty() {
+        let decoded: CredentialAudit = serde_json::from_str("{}").expect("legacy decode");
+        assert!(decoded.entries.is_empty());
     }
 
     #[tokio::test]

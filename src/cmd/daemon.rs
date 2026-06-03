@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use ghbrk::audit::{AuditLogger, DEFAULT_AUDIT_PATH};
 use ghbrk::broker::{run_broker, BrokerConfig};
 use ghbrk::policy::Policy;
@@ -61,7 +62,8 @@ fn run_inner() -> i32 {
 
     let config = BrokerConfig {
         socket_path,
-        policy,
+        policy: Arc::new(ArcSwap::from_pointee(policy)),
+        policy_path,
         audit_logger: logger,
         credentials_root,
     };

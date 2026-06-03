@@ -58,11 +58,19 @@ install -d -m 0750 -o ghbrk -g ghbrk-clients /var/log/ghbrk
 # 5. Install example policy (no overwrite if already present)
 # ---------------------------------------------------------------------------
 if [ ! -f "$POLICY_DST" ]; then
-    install -m 0644 -o root -g root "$POLICY_SRC" "$POLICY_DST"
-    echo "Installed example policy to $POLICY_DST"
+    if [ -f "$POLICY_SRC" ]; then
+        install -m 0600 -o ghbrk -g ghbrk "$POLICY_SRC" "$POLICY_DST"
+        echo "Installed example policy to $POLICY_DST"
+    else
+        install -m 0600 -o ghbrk -g ghbrk /dev/null "$POLICY_DST"
+        echo "Created empty policy file at $POLICY_DST"
+    fi
 else
     echo "Policy file $POLICY_DST already exists, skipping."
 fi
+# Unconditionally correct owner and mode (idempotent on re-run).
+chown ghbrk:ghbrk "$POLICY_DST"
+chmod 0600 "$POLICY_DST"
 
 # ---------------------------------------------------------------------------
 # 7. Install systemd unit and tmpfiles snippet

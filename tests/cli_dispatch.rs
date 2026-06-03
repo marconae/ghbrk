@@ -234,3 +234,64 @@ fn version_flag_prints_version_and_exits_zero() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ghbrk"), "stdout: {stdout}");
 }
+
+#[test]
+fn help_lists_allow_subcommand() {
+    let out = Command::new(bin())
+        .arg("--help")
+        .output()
+        .expect("failed to run ghbrk --help");
+    assert!(out.status.success(), "exit: {:?}", out.status.code());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // "allow" must appear as a subcommand entry, not just a word in a description.
+    // Clap formats it as "  allow  <description>" at the start of a line.
+    assert!(
+        stdout.lines().any(|l| l.trim_start().starts_with("allow")),
+        "stdout must list 'allow' subcommand: {stdout}"
+    );
+}
+
+#[test]
+fn allow_dispatches_with_repo_and_operands() {
+    // Without a broker running, the allow subcommand must fail with exit code 1
+    // and stderr mentioning the broker — proving dispatch reaches the gateway.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = missing_socket_path(&tmp);
+    let out = Command::new(bin())
+        .args(["allow", "acme/web", "write"])
+        .env("GHBRK_SOCKET", &socket)
+        .output()
+        .expect("failed to run ghbrk allow acme/web write");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when broker is missing"
+    );
+    assert_eq!(out.status.code(), Some(1), "expected exit code 1");
+    assert!(
+        stderr.contains("ghbrk:") && stderr.contains("broker"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn allow_accepts_user_flag() {
+    // --user flag is accepted and the request is dispatched to the gateway.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = missing_socket_path(&tmp);
+    let out = Command::new(bin())
+        .args(["allow", "acme/web", "write", "--user", "alice"])
+        .env("GHBRK_SOCKET", &socket)
+        .output()
+        .expect("failed to run ghbrk allow acme/web write --user alice");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when broker is missing"
+    );
+    assert_eq!(out.status.code(), Some(1), "expected exit code 1");
+    assert!(
+        stderr.contains("ghbrk:") && stderr.contains("broker"),
+        "stderr: {stderr}"
+    );
+}

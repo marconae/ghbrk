@@ -92,3 +92,35 @@ The daemon binds `/var/run/ghbrk/broker.sock` with mode `0660` and group `ghbrk-
 * *THEN* the daemon SHOULD log the supplementary group lookup failure at `warn` level
 * *AND* the daemon MUST still build the `ChildSpec` with the peer's `uid` and primary `gid`
 * *AND* the daemon MUST NOT deny the request solely because the supplementary group lookup failed
+
+### Scenario: Broker holds a reloadable policy handle
+
+* *GIVEN* the daemon has loaded `/etc/ghbrk/policy.yaml` at startup
+* *WHEN* an in-process policy reload replaces the active policy document
+* *THEN* connections accepted after the reload MUST evaluate against the new policy
+* *AND* in-flight connections that already captured the prior policy MUST complete without panicking
+
+### Scenario: Broker enforces privilege for the allow request
+
+* *GIVEN* the broker receives a `Request { tool: allow, ... }`
+* *AND* the connecting peer's `SO_PEERCRED` reports an effective UID other than 0
+* *WHEN* the broker processes the request
+* *THEN* the broker MUST send a `Denied` frame indicating elevated privileges are required
+* *AND* the broker MUST NOT write to the policy file
+* *AND* the broker MUST write a deny entry to the audit log
+
+### Scenario: Broker appends a rule and reloads on a privileged allow request
+
+* *GIVEN* the broker receives a `Request { tool: allow, args: ["acme/web", "write"] }`
+* *AND* the connecting peer's `SO_PEERCRED` reports effective UID 0
+* *WHEN* the broker processes the request
+* *THEN* the broker MUST append a validated allow rule to the policy file
+* *AND* the broker MUST reload the policy handle so subsequent connections see the new rule
+* *AND* the broker MUST write an allow entry to the audit log and stream a confirmation followed by an `Exit { code: 0 }` frame
+
+### Scenario: Allow request validates operands before mutating the policy file
+
+* *GIVEN* the broker receives a privileged `Request { tool: allow, args: ["acme/web", "frobnicate"] }`
+* *WHEN* the broker validates the operands against the loaded policy vocabulary and roles
+* *THEN* the broker MUST reject the request with a `Denied` frame mentioning `frobnicate`
+* *AND* the broker MUST leave the policy file byte-for-byte unchanged

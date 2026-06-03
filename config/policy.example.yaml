@@ -7,7 +7,7 @@
 #   user       - OS username of the calling process, or "*" for any user
 #   org        - GitHub organisation (or username for personal repos)
 #   repo       - Repository name
-#   operations - List of operations this rule covers (at least one required)
+#   operations - List of operations this rule covers, or a role name (string)
 #   branches   - Optional list of branch globs (default: ["*"])
 #   effect     - "allow" or "deny"
 #
@@ -17,8 +17,64 @@
 #   issue_open, issue_comment, issue_close
 #   release_create
 #   gh_api_read  (GET-only GitHub REST API calls via `gh api`)
+#
+# Built-in roles (always available, can be overridden in the roles: section):
+#   read-only  - fetch, clone, pull, pr_review, gh_api_read
+#   write      - read-only + push, pr_open, pr_comment, pr_close, pr_merge,
+#                issue_open, issue_comment, issue_close
+#   admin      - write + release_create
+#
+# User-defined roles (declared in the optional roles: section below) shadow
+# built-in roles of the same name. A role name used in operations: is resolved
+# at evaluation time, so editing a role definition fans out to every rule that
+# references it.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional roles: section — define or override named operation sets.
+# Built-in roles (read-only, write, admin) are always available and can be
+# referenced in any rule without declaring them here.  Declare a role here to
+# override a built-in or to introduce a completely new role.
+# ─────────────────────────────────────────────────────────────────────────────
+# roles:
+#   # User-defined role: grants only the operations needed for deployments.
+#   deploy:
+#     - push
+#     - release_create
+#
+#   # Override the built-in "write" role to remove pr_merge for this install.
+#   write:
+#     - push
+#     - fetch
+#     - pull
+#     - clone
+#     - pr_open
+#     - pr_comment
+#     - pr_close
+#     - pr_review
+#     - issue_open
+#     - issue_comment
+#     - issue_close
+#     - gh_api_read
 
 rules:
+  # -------------------------------------------------------------------------
+  # Role-referencing rules — use a role name instead of an inline list.
+  # -------------------------------------------------------------------------
+  # Grant the built-in "write" role to bob on all acme repos.
+  # - user: bob
+  #   org: acme
+  #   repo: "*"
+  #   operations: write
+  #   effect: allow
+
+  # Grant a custom "deploy" role to alice on the web repo (main only).
+  # - user: alice
+  #   org: acme
+  #   repo: web
+  #   branches: [main]
+  #   operations: deploy
+  #   effect: allow
+
   # -------------------------------------------------------------------------
   # Explicit deny: nobody may force-push to the protected release branches.
   # This rule runs before any allow rule so it takes precedence (first-match).

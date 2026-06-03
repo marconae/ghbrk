@@ -6,6 +6,8 @@ Provides a `ghbrk policy <org>/<repo>` subcommand that reports which operations 
 
 `ghbrk policy <org>/<repo>` takes a repository specifier and asks the broker, over the socket, to evaluate every operation in the fixed operations vocabulary (`push`, `fetch`, `clone`, `pull`, `pr_open`, `pr_comment`, `pr_close`, `pr_merge`, `pr_review`, `issue_open`, `issue_comment`, `issue_close`, `release_create`, `gh_api_read`) for the calling user against that repo. The broker identifies the caller via `SO_PEERCRED` and evaluates each operation under the same first-match-wins, default-deny rules the policy engine uses for live requests. The command groups the results into allowed and forbidden operations and prints them. No git/gh process is executed and nothing leaves the machine. Branch-scoped operations are evaluated at the operation level for this summary.
 
+Because the policy engine resolves roles at evaluation time, a permission granted via a role (built-in or user-defined) surfaces as the concrete operations the role expands to, never as the bare role name. All prior grouping, default-deny, and error behaviour is unchanged.
+
 ## Scenarios
 
 ### Scenario: Allowed operations are listed for a repo
@@ -41,3 +43,17 @@ Provides a `ghbrk policy <org>/<repo>` subcommand that reports which operations 
 * *WHEN* the user runs `ghbrk policy acme/web`
 * *THEN* the command MUST print an error indicating the broker is unavailable to stderr
 * *AND* the command MUST exit with a non-zero status
+
+### Scenario: Role-granted operations appear as concrete operations in the listing
+
+* *GIVEN* the policy grants the calling user the `write` role on `acme/web`
+* *WHEN* the user runs `ghbrk policy acme/web`
+* *THEN* the command MUST list the concrete operations the `write` role expands to (e.g. `push`, `pr_open`) under the allowed operations
+* *AND* the command MUST NOT print the bare role name `write` in the operation listing
+* *AND* the command MUST exit with status zero
+
+### Scenario: Operations outside the granted role are listed as forbidden
+
+* *GIVEN* the policy grants the calling user only the `read-only` role on `acme/web`
+* *WHEN* the user runs `ghbrk policy acme/web`
+* *THEN* the command MUST list the operations outside `read-only` (e.g. `push`, `pr_merge`) under the forbidden operations

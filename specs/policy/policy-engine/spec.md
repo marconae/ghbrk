@@ -17,6 +17,8 @@ Rules are evaluated in document order; the first matching rule wins. If no rule 
 
 The operations vocabulary is fixed: `push`, `fetch`, `clone`, `pull`, `pr_open`, `pr_comment`, `pr_close`, `pr_merge`, `pr_review`, `issue_open`, `issue_comment`, `issue_close`, `release_create`, `gh_api_read`. Branch matching is glob-style (`*` and `?`) and applies only to operations with `has_branch() == true` (currently `push` only). The `pull` operation is treated as distinct from `fetch`: a rule listing one MUST NOT implicitly match the other. The `gh_api_read` operation is user-scoped: it carries no branch and is typically authorised by a rule with `org: "*"` and `repo: "*"`, so org/repo are matched as wildcards. Branch matching is ignored for `gh_api_read` (`has_branch() == false`).
 
+A rule's `operations` field may hold either an inline operation list (as before) or a single role name. Roles are resolved at evaluation time. See `policy/policy-roles` for the full role model and scenarios.
+
 ## Scenarios
 
 ### Scenario: Allow rule matches exact user repo and operation
@@ -122,3 +124,10 @@ The operations vocabulary is fixed: `push`, `fetch`, `clone`, `pull`, `pr_open`,
 * *WHEN* the engine evaluates a `gh_api_read` request from the same user
 * *THEN* the engine MUST return `deny`
 * *AND* the deny reason MUST indicate "no matching rule"
+
+### Scenario: An inline operations list still loads and matches
+
+* *GIVEN* a policy with one rule `{ user: alice, org: acme, repo: web, operations: [push, fetch], effect: allow }`
+* *WHEN* the engine evaluates `(user=alice, org=acme, repo=web, op=fetch, branch=None)`
+* *THEN* the engine MUST treat the inline list as the rule's operation set without role resolution
+* *AND* the engine MUST return `allow`

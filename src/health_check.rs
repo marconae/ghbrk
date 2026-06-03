@@ -7,11 +7,22 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+
+use crate::protocol::{CredentialAudit, PathAudit};
 
 const REQUIRED_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o777;
+
+/// Label for the per-user credential directory entry in a [`CredentialAudit`].
+const CREDENTIAL_DIR_LABEL: &str = "Credential dir";
+
+/// Label for the SSH key entry in a [`CredentialAudit`].
+const SSH_KEY_LABEL: &str = "SSH key";
+
+/// Label for the token entry in a [`CredentialAudit`].
+const TOKEN_LABEL: &str = "Token";
 
 /// Outcome of pinging the GitHub user endpoint.
 pub enum GithubResult {
@@ -36,6 +47,52 @@ pub fn run_checks(creds_root: &Path, user: &str, out: &mut impl Write) -> bool {
     all_ok &= check_file("Token", &paths.token, out);
     check_github_api(&paths.token, &mut all_ok, out);
     all_ok
+}
+
+/// Stats the caller's credential directory and each credential file, recording
+/// the observed owner uid and mode of every path. The broker runs this as the
+/// privileged service account on behalf of a caller who cannot stat these paths
+/// directly, then ships the result over the socket so `doctor` can run the
+/// tiered permission classifier against them.
+///
+/// Returns an audit with no entries if the user name cannot be resolved to a
+/// credential path (the textual [`run_checks`] surfaces that error separately).
+pub fn audit_credential_paths(creds_root: &Path, user: &str) -> CredentialAudit {
+    let paths = match crate::credentials::credential_paths_in(creds_root, user) {
+        Ok(p) => p,
+        Err(_) => return CredentialAudit::default(),
+    };
+
+    let mut entries = Vec::with_capacity(3);
+    if let Some(dir) = paths.ssh_key.parent() {
+        entries.push(audit_path(CREDENTIAL_DIR_LABEL, dir));
+    }
+    entries.push(audit_path(SSH_KEY_LABEL, &paths.ssh_key));
+    entries.push(audit_path(TOKEN_LABEL, &paths.token));
+
+    CredentialAudit { entries }
+}
+
+/// Stat one path into a [`PathAudit`]. A path that does not exist (or cannot be
+/// stat'd) is recorded as absent with zeroed owner/mode; the classifier on the
+/// client treats absence separately from a permission widening.
+fn audit_path(label: &str, path: &Path) -> PathAudit {
+    match fs::metadata(path) {
+        Ok(meta) => PathAudit {
+            label: label.to_string(),
+            path: path.to_path_buf(),
+            present: true,
+            observed_owner_uid: meta.uid(),
+            observed_mode: meta.mode() & PERMISSION_MASK,
+        },
+        Err(_) => PathAudit {
+            label: label.to_string(),
+            path: path.to_path_buf(),
+            present: false,
+            observed_owner_uid: 0,
+            observed_mode: 0,
+        },
+    }
 }
 
 fn check_file(label: &str, path: &Path, out: &mut impl Write) -> bool {
@@ -196,6 +253,59 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(!ok);
         assert!(s.contains("ghbrk check:"), "{s}");
+    }
+
+    #[test]
+    fn audit_reports_owner_and_mode_for_dir_and_files() {
+        let dir = TempDir::new().unwrap();
+        write_mode(&dir.path().join("alice/id_rsa"), "KEY", 0o600);
+        write_mode(&dir.path().join("alice/token"), "tok", 0o640);
+        fs::set_permissions(dir.path().join("alice"), fs::Permissions::from_mode(0o700)).unwrap();
+
+        let audit = audit_credential_paths(dir.path(), "alice");
+        let by_label = |label: &str| {
+            audit
+                .entries
+                .iter()
+                .find(|e| e.label == label)
+                .unwrap_or_else(|| panic!("missing entry for {label}"))
+        };
+
+        let me = nix::unistd::geteuid().as_raw();
+
+        let dir_entry = by_label("Credential dir");
+        assert!(dir_entry.present);
+        assert_eq!(dir_entry.observed_mode, 0o700);
+        assert_eq!(dir_entry.observed_owner_uid, me);
+        assert!(dir_entry.path.ends_with("alice"));
+
+        let key_entry = by_label("SSH key");
+        assert!(key_entry.present);
+        assert_eq!(key_entry.observed_mode, 0o600);
+        assert_eq!(key_entry.observed_owner_uid, me);
+
+        let token_entry = by_label("Token");
+        assert!(token_entry.present);
+        assert_eq!(token_entry.observed_mode, 0o640);
+    }
+
+    #[test]
+    fn audit_marks_missing_paths_absent_with_zeroed_owner_mode() {
+        let dir = TempDir::new().unwrap();
+        let audit = audit_credential_paths(dir.path(), "ghost");
+        assert_eq!(audit.entries.len(), 3);
+        for entry in &audit.entries {
+            assert!(!entry.present, "{} should be absent", entry.label);
+            assert_eq!(entry.observed_owner_uid, 0);
+            assert_eq!(entry.observed_mode, 0);
+        }
+    }
+
+    #[test]
+    fn audit_invalid_user_yields_no_entries() {
+        let dir = TempDir::new().unwrap();
+        let audit = audit_credential_paths(dir.path(), "../etc");
+        assert!(audit.entries.is_empty());
     }
 
     #[test]

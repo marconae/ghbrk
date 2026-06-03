@@ -40,6 +40,16 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Grant operations or a named role on a repository to a user
+    Allow {
+        /// Repository in `org/repo` format
+        repo: String,
+        /// Operations or role name to grant
+        operands: Vec<String>,
+        /// Grant to this user instead of the current user
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -54,5 +64,10 @@ fn main() -> ExitCode {
         Commands::Policy { repo } => cmd::policy::run(&repo),
         Commands::Git { args } => cmd::git::run(&args),
         Commands::Gh { args } => cmd::gh::run(&args),
+        Commands::Allow {
+            repo,
+            operands,
+            user,
+        } => cmd::allow::run(repo, operands, user),
     }
 }

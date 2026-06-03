@@ -6,7 +6,7 @@ Defines the request and response message formats and length-prefixed JSON framin
 
 Frames are length-prefixed: a 4-byte big-endian unsigned integer giving payload length in bytes, followed by exactly that many bytes of UTF-8 JSON. Each frame contains exactly one JSON object. The same framing is used in both directions on the same Unix stream socket. There is no maximum hard limit on frame size beyond available memory, but readers MUST treat declared lengths greater than 16 MiB as a protocol error.
 
-Two caller-tool discriminants support the explicit gateway's diagnostic subcommands: `explain` and `policy`. Both are non-executing query requests: the broker resolves and/or evaluates policy and streams the result back as `StdoutChunk` frames terminated by an `Exit` frame, reusing the existing framing and server-frame variants. No new server-frame variant is required. The `check` discriminant is retained and reused by `ghbrk doctor`.
+Three caller-tool discriminants support the explicit gateway's diagnostic and administrative subcommands: `explain`, `policy`, and `allow`. `explain` and `policy` are non-executing query requests: the broker resolves and/or evaluates policy and streams the result back as `StdoutChunk` frames terminated by an `Exit` frame, reusing the existing framing and server-frame variants. `allow` is a privileged mutation request: success is signalled with `StdoutChunk` then `Exit`, and privilege/validation failures with `Denied`. No new server-frame variant is required for any of these. The `check` discriminant is retained and reused by `ghbrk doctor`.
 
 ## Scenarios
 
@@ -78,3 +78,18 @@ Two caller-tool discriminants support the explicit gateway's diagnostic subcomma
 * *WHEN* the request is encoded to bytes and decoded back
 * *THEN* the decoded value MUST equal the original
 * *AND* the decoded `tool` MUST be the `policy` discriminant
+
+### Scenario: Allow request frame round-trips with the allow discriminant
+
+* *GIVEN* a `Request { tool: "allow", args: ["acme/web", "write", "--user", "marconae"], cwd: "/work/repo" }`
+* *WHEN* the request is encoded to bytes and decoded back
+* *THEN* the decoded value MUST equal the original
+* *AND* the encoded `tool` discriminant field MUST be the string `"allow"`
+
+### Scenario: Allow request reuses the existing server-frame variants
+
+* *GIVEN* the broker has processed an `allow` request
+* *WHEN* the broker reports the outcome
+* *THEN* the broker MUST signal success using `StdoutChunk` followed by an `Exit` frame
+* *AND* the broker MUST signal a privilege or validation failure using a `Denied` frame
+* *AND* the broker MUST NOT introduce a new `ServerFrame` variant for the allow request

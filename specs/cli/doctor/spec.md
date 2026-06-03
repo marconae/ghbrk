@@ -4,7 +4,7 @@ Provides a `ghbrk doctor` subcommand that verifies, in one command, that the loc
 
 ## Background
 
-`ghbrk doctor` runs as the invoking Unix user and makes the privilege boundary explicit: it reports the state of each precondition rather than hiding it. It subsumes the former `ghbrk check` credential checks. Because the credential directory `/etc/ghbrk/credentials/<user>/` is owned by the `ghbrk` system user (mode `0700`), the caller cannot stat it directly; credential checks are performed by the broker on the caller's behalf over the socket and the results are streamed back. The daemon-reachability check connects to `/var/run/ghbrk/broker.sock`. The policy-parse check confirms that `/etc/ghbrk/policy.yaml` deserialises under the policy engine schema. `doctor` prints one human-readable status line per check and exits zero only when every check passes.
+`ghbrk doctor` runs as the invoking Unix user and makes the privilege boundary explicit: it reports the state of each precondition rather than hiding it. It subsumes the former `ghbrk check` credential checks. Because the credential directory `/etc/ghbrk/credentials/<user>/` is owned by the `ghbrk` system user (mode `0700`), the caller cannot stat it directly; credential checks are performed by the broker on the caller's behalf over the socket and the results are streamed back. The daemon-reachability check connects to `/var/run/ghbrk/broker.sock`. The policy-parse check confirms that `/etc/ghbrk/policy.yaml` deserialises under the policy engine schema. `doctor` prints one human-readable status line per check and exits zero only when no check emitted an ERROR; warnings are tolerated.
 
 ## Scenarios
 
@@ -64,15 +64,38 @@ Provides a `ghbrk doctor` subcommand that verifies, in one command, that the loc
 * *THEN* the command MUST print a line reporting `Policy: INVALID` that names the parse error
 * *AND* the command MUST exit with a non-zero status
 
+### Scenario: Policy file writable by group or other is reported and fails
+
+* *GIVEN* `/etc/ghbrk/policy.yaml` is owned by `ghbrk` but has a group or other write bit set (for example `0660` or `0666`)
+* *WHEN* the user runs `ghbrk doctor`
+* *THEN* the command MUST print a line reporting `Policy permissions: ERROR` that names the actual mode found
+* *AND* the command MUST exit with a non-zero status
+
+### Scenario: Policy file owned by wrong user is reported and fails
+
+* *GIVEN* `/etc/ghbrk/policy.yaml` has mode `0600` but is owned by a user other than `ghbrk`
+* *WHEN* the user runs `ghbrk doctor`
+* *THEN* the command MUST print a line reporting `Policy permissions: ERROR` that names the actual owner found
+* *AND* the command MUST exit with a non-zero status
+
 ### Scenario: All checks passing exits zero
 
-* *GIVEN* the daemon is reachable, the credentials are present with mode `0600`, and the policy parses cleanly
+* *GIVEN* the daemon is reachable, the credentials are present with mode `0600`, the policy parses cleanly, and every audited file and directory — `/etc/ghbrk/`, `/etc/ghbrk/policy.yaml`, `/run/ghbrk/ghbrk.sock`, the credential directory, and the credential files — has its expected owner and a mode no broader than its expectation
 * *WHEN* the user runs `ghbrk doctor`
-* *THEN* the command MUST exit with status zero
+* *THEN* the command MUST print one status line per check, each tagged `OK`
+* *AND* the command MUST exit with status zero
 
-### Scenario: Any failing check exits non-zero
+### Scenario: Warnings without errors still exit zero
 
-* *GIVEN* at least one of the daemon, credential, or policy checks fails
+* *GIVEN* one or more checks emit a `WARNING` (a read-path exposure such as a `0640` policy file or credential) and no check emits an `ERROR`
+* *WHEN* the user runs `ghbrk doctor`
+* *THEN* the command MUST print a `WARNING` status line for each read-path exposure
+* *AND* the command MUST exit with status zero
+
+### Scenario: Any check emitting an error exits non-zero
+
+* *GIVEN* at least one check — daemon, credential-mode, policy-parse, policy-permission, config-dir-permission, socket-permission, credential-dir-permission, or credential-file-permission — emits an `ERROR`
 * *WHEN* the user runs `ghbrk doctor`
 * *THEN* the command MUST exit with a non-zero status
 * *AND* the command MUST still print a status line for every check that was attempted
+* *AND* the presence of `WARNING` lines MUST NOT by itself change the exit status

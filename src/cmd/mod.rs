@@ -1,3 +1,4 @@
+pub mod allow;
 pub mod daemon;
 pub mod doctor;
 pub mod explain;
