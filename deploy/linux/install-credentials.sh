@@ -54,7 +54,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Create per-user credential directory
 # ---------------------------------------------------------------------------
-install -d -m 0750 -o ghbrk -g ghbrk "$CRED_DIR"
+install -d -m 0700 -o ghbrk -g ghbrk "$CRED_DIR"
 echo "Credential directory: $CRED_DIR"
 
 # ---------------------------------------------------------------------------

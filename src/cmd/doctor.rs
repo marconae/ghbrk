@@ -500,28 +500,29 @@ fn check_socket_permissions(path: &Path) -> PermissionVerdict {
     verdict
 }
 
-/// Read and parse the policy file. Prints one status line and returns success.
-fn check_policy(path: &Path) -> bool {
+/// Compute the policy file status as a `(success, message)` pair without
+/// printing. This pure helper enables unit-testing the message content.
+fn policy_status(path: &Path) -> (bool, String) {
     match std::fs::File::open(path) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            println!("Policy: MISSING ({})", path.display());
-            false
+            (false, format!("Policy: MISSING ({})", path.display()))
         }
-        Err(err) => {
-            println!("Policy: MISSING ({}: {})", path.display(), err);
-            false
-        }
+        Err(err) => (
+            false,
+            format!("Policy: ERROR ({}: {})", path.display(), err),
+        ),
         Ok(file) => match Policy::from_reader(file) {
-            Ok(_) => {
-                println!("Policy: OK");
-                true
-            }
-            Err(err) => {
-                println!("Policy: INVALID ({})", err);
-                false
-            }
+            Ok(_) => (true, "Policy: OK".to_string()),
+            Err(err) => (false, format!("Policy: INVALID ({})", err)),
         },
     }
+}
+
+/// Read and parse the policy file. Prints one status line and returns success.
+fn check_policy(path: &Path) -> bool {
+    let (ok, msg) = policy_status(path);
+    println!("{msg}");
+    ok
 }
 
 #[cfg(test)]
@@ -810,6 +811,29 @@ mod tests {
             PermissionVerdict::Error(detail) => assert_eq!(detail, "daemon unreachable"),
             other => panic!("false should map to Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn policy_permission_denied_returns_false() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip this test when running as root (root can read any file).
+        if nix::unistd::getuid().is_root() {
+            return;
+        }
+
+        let f = NamedTempFile::new().unwrap();
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (ok, msg) = policy_status(f.path());
+        assert!(!ok, "policy_status must return false for an unreadable file");
+        assert!(
+            msg.contains("Policy: ERROR"),
+            "message must contain 'Policy: ERROR', got: {msg}"
+        );
+        assert!(
+            !msg.contains("MISSING"),
+            "permission-denied must not say MISSING, got: {msg}"
+        );
     }
 
     #[tokio::test]
