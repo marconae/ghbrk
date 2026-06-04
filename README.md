@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.svg" alt="ghbrk Logo" width="200">
+
 # ghbrk
 
 **A credential broker for AI coding agents on Linux**
