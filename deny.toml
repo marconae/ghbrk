@@ -17,7 +17,6 @@ allow = [
 ]
 confidence-threshold = 0.8
 
-
 [bans]
 # Warn on multiple versions of the same crate
 multiple-versions = "warn"
