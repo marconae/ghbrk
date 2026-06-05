@@ -4,8 +4,9 @@
 #   1. cargo deny check — supply-chain gate before any artefact is built
 #   2. Build stripped release binary for x86_64-unknown-linux-gnu
 #   3. cargo-about generates LICENSE-THIRD-PARTY from about.hbs
-#   4. Package ghbrk-<tag>-x86_64-unknown-linux-gnu.tar.gz
-#   5. Create GitHub Release and upload the tarball
+#   4. Scan for upstream NOTICE files and append to LICENSE-THIRD-PARTY
+#   5. Package ghbrk-<tag>-x86_64-unknown-linux-gnu.tar.gz
+#   6. Create GitHub Release and upload the tarball
 
 name: Release
 
@@ -67,6 +68,25 @@ jobs:
 
       - name: Generate LICENSE-THIRD-PARTY
         run: cargo about generate --config about.toml about.hbs --output-file LICENSE-THIRD-PARTY
+
+      # Apache-2.0 §4(d): reproduce any NOTICE file shipped by a dependency.
+      # aws-lc-sys 0.41.0 ships none today; this step is a no-op but will
+      # activate automatically if a future upgrade adds one.
+      - name: Append upstream NOTICE files to LICENSE-THIRD-PARTY
+        run: |
+          find ~/.cargo/registry/src -path "*/aws-lc-sys-*/NOTICE" \
+               -o -path "*/aws-lc-sys-*/NOTICES" \
+               -o -path "*/aws-lc-rs-*/NOTICE" \
+               -o -path "*/aws-lc-rs-*/NOTICES" \
+               2>/dev/null \
+          | sort -u \
+          | while read -r f; do
+              printf '\n================================================================================\n' >> LICENSE-THIRD-PARTY
+              printf 'NOTICE: %s\n' "$(basename "$(dirname "$f")")" >> LICENSE-THIRD-PARTY
+              printf '================================================================================\n' >> LICENSE-THIRD-PARTY
+              cat "$f" >> LICENSE-THIRD-PARTY
+            done
+          echo "(NOTICE scan complete)"
 
       # Archive layout:
       #   ghbrk-v1.0.3-x86_64-linux/
