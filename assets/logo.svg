@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="keyFriendly" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FBBF24"/>
+      <stop offset="100%" style="stop-color:#F59E0B"/>
+    </linearGradient>
+    <linearGradient id="bgSoft" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#E0E7FF"/>
+      <stop offset="100%" style="stop-color:#C7D2FE"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Soft rounded background -->
+  <rect x="30" y="15" width="140" height="140" rx="32" fill="url(#bgSoft)"/>
+  
+  <!-- Friendly key character -->
+  <g transform="translate(100, 80)">
+    <!-- Key head (face) -->
+    <circle cx="0" cy="-10" r="30" fill="url(#keyFriendly)"/>
+    
+    <!-- Happy eyes -->
+    <circle cx="-10" cy="-15" r="5" fill="#78350F"/>
+    <circle cx="10" cy="-15" r="5" fill="#78350F"/>
+    <!-- Eye shine -->
+    <circle cx="-8" cy="-17" r="2" fill="#FFF"/>
+    <circle cx="12" cy="-17" r="2" fill="#FFF"/>
+    
+    <!-- Smile -->
+    <path d="M-12 -2 Q0 10 12 -2" fill="none" stroke="#78350F" stroke-width="3" stroke-linecap="round"/>
+    
+    <!-- Key shaft -->
+    <rect x="-8" y="18" width="16" height="40" rx="4" fill="url(#keyFriendly)"/>
+    
+    <!-- Key teeth (friendly/rounded) -->
+    <rect x="8" y="35" width="12" height="8" rx="3" fill="url(#keyFriendly)"/>
+    <rect x="8" y="48" width="8" height="6" rx="2" fill="url(#keyFriendly)"/>
+  </g>
+  
+  <!-- Small checkmark badge -->
+  <circle cx="135" cy="40" r="14" fill="#10B981"/>
+  <path d="M128 40 L133 45 L142 36" fill="none" stroke="#FFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Logo text with more spacing -->
+  <text x="100" y="192" 
+        fill="#1F2937" 
+        font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" 
+        font-size="28" 
+        font-weight="700" 
+        text-anchor="middle"
+        stroke="#FFF" 
+        stroke-width="5" 
+        paint-order="stroke fill">ghbrk</text>
+</svg>
