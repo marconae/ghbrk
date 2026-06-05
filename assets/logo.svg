@@ -39,15 +39,5 @@
   <!-- Small checkmark badge -->
   <circle cx="135" cy="40" r="14" fill="#10B981"/>
   <path d="M128 40 L133 45 L142 36" fill="none" stroke="#FFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  
-  <!-- Logo text with more spacing -->
-  <text x="100" y="192" 
-        fill="#1F2937" 
-        font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" 
-        font-size="28" 
-        font-weight="700" 
-        text-anchor="middle"
-        stroke="#FFF" 
-        stroke-width="5" 
-        paint-order="stroke fill">ghbrk</text>
+
 </svg>
