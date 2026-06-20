@@ -1,43 +1,60 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 170" width="200" height="170">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
   <defs>
-    <linearGradient id="keyFriendly" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#FBBF24"/>
-      <stop offset="100%" style="stop-color:#F59E0B"/>
-    </linearGradient>
-    <linearGradient id="bgSoft" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#E0E7FF"/>
-      <stop offset="100%" style="stop-color:#C7D2FE"/>
-    </linearGradient>
+    <clipPath id="bgClip">
+      <rect x="25" y="10" width="150" height="150" rx="34"/>
+    </clipPath>
   </defs>
-  
-  <!-- Soft rounded background -->
-  <rect x="30" y="15" width="140" height="140" rx="32" fill="url(#bgSoft)"/>
-  
-  <!-- Friendly key character -->
-  <g transform="translate(100, 80)">
-    <!-- Key head (face) -->
-    <circle cx="0" cy="-10" r="30" fill="url(#keyFriendly)"/>
-    
-    <!-- Happy eyes -->
-    <circle cx="-10" cy="-15" r="5" fill="#78350F"/>
-    <circle cx="10" cy="-15" r="5" fill="#78350F"/>
-    <!-- Eye shine -->
-    <circle cx="-8" cy="-17" r="2" fill="#FFF"/>
-    <circle cx="12" cy="-17" r="2" fill="#FFF"/>
-    
-    <!-- Smile -->
-    <path d="M-12 -2 Q0 10 12 -2" fill="none" stroke="#78350F" stroke-width="3" stroke-linecap="round"/>
-    
-    <!-- Key shaft -->
-    <rect x="-8" y="18" width="16" height="40" rx="4" fill="url(#keyFriendly)"/>
-    
-    <!-- Key teeth (friendly/rounded) -->
-    <rect x="8" y="35" width="12" height="8" rx="3" fill="url(#keyFriendly)"/>
-    <rect x="8" y="48" width="8" height="6" rx="2" fill="url(#keyFriendly)"/>
-  </g>
-  
-  <!-- Small checkmark badge -->
-  <circle cx="135" cy="40" r="14" fill="#10B981"/>
-  <path d="M128 40 L133 45 L142 36" fill="none" stroke="#FFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 
+  <!-- Base background -->
+  <rect x="25" y="10" width="150" height="150" rx="34" fill="#3B82F6"/>
+
+  <!-- Soft abstract shapes -->
+  <g clip-path="url(#bgClip)">
+    <circle cx="40" cy="140" r="50" fill="#60A5FA" opacity="0.5"/>
+    <circle cx="160" cy="30" r="40" fill="#60A5FA" opacity="0.5"/>
+    <circle cx="170" cy="120" r="35" fill="#2563EB" opacity="0.3"/>
+    <circle cx="30" cy="40" r="30" fill="#93C5FD" opacity="0.4"/>
+  </g>
+
+  <!-- Butler with key as body - moved up slightly for bottom margin -->
+  <g transform="translate(100, 82)">
+
+    <!-- KEY BODY -->
+    <!-- Key head (round) -->
+    <circle cx="0" cy="18" r="24" fill="#FCD34D"/>
+    <circle cx="0" cy="14" r="9" fill="#3B82F6"/>
+
+    <!-- Key shaft (sharp rectangle) -->
+    <rect x="-7" y="40" width="14" height="28" fill="#FCD34D"/>
+
+    <!-- Key teeth - two teeth -->
+    <rect x="7" y="48" width="12" height="6" fill="#FCD34D"/>
+    <rect x="7" y="60" width="8" height="6" fill="#FCD34D"/>
+
+    <!-- BOW TIE -->
+    <ellipse cx="-10" cy="2" rx="9" ry="5" fill="#DC2626"/>
+    <ellipse cx="10" cy="2" rx="9" ry="5" fill="#DC2626"/>
+    <circle cx="0" cy="2" r="5" fill="#DC2626"/>
+
+    <!-- HEAD -->
+    <circle cx="0" cy="-22" r="22" fill="#FECACA"/>
+
+    <!-- Rosy cheeks -->
+    <circle cx="-12" cy="-16" r="4" fill="#FCA5A5" opacity="0.5"/>
+    <circle cx="12" cy="-16" r="4" fill="#FCA5A5" opacity="0.5"/>
+
+    <!-- Closed happy eyes -->
+    <path d="M-10 -24 Q-7 -28 -4 -24" fill="none" stroke="#1F2937" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M4 -24 Q7 -28 10 -24" fill="none" stroke="#1F2937" stroke-width="2.5" stroke-linecap="round"/>
+
+    <!-- Simple smile -->
+    <path d="M-6 -12 Q0 -6 6 -12" fill="none" stroke="#9A3412" stroke-width="2.5" stroke-linecap="round"/>
+
+    <!-- Bowler hat -->
+    <ellipse cx="0" cy="-42" rx="20" ry="5" fill="#374151"/>
+    <ellipse cx="0" cy="-50" rx="13" ry="10" fill="#374151"/>
+  </g>
+
+  <!-- Logo text -->
+  <text x="100" y="192" fill="#1F2937" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="28" font-weight="700" text-anchor="middle" stroke="#FFF" stroke-width="5" paint-order="stroke fill">ghbrk</text>
 </svg>
