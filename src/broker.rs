@@ -614,7 +614,11 @@ where
     let new_text = match append_result {
         Ok(Ok(text)) => text,
         Ok(Err(err)) => {
-            let reason = format!("allow: failed to update policy file: {err}");
+            let reason = format!(
+                "allow: failed to update policy file: {err} (policy path: {}; \
+                 hint: set GHBRK_POLICY to a writable path such as /var/etc/ghbrk/policy.yaml)",
+                policy_path.display()
+            );
             audit_allow(
                 audit,
                 username,

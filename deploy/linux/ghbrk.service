@@ -18,7 +18,9 @@ NoNewPrivileges=true
 AmbientCapabilities=CAP_SETUID CAP_SETGID
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 ProtectSystem=strict
-PrivateTmp=true
+# PrivateTmp is intentionally absent: the broker spawns gh as a child that must read
+# user-supplied release asset files from the shared /tmp (e.g. /tmp/myapp-1.0.0.tar.gz).
+# A private /tmp namespace would hide those files from the child process.
 ReadWritePaths=/run/ghbrk /var/log/ghbrk
 ProtectHome=no  # Required: user-impersonated child processes must write to repos under $HOME
 ProtectKernelTunables=true

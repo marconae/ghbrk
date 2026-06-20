@@ -343,6 +343,76 @@ async fn allow_audits_the_deny() {
     );
 }
 
+/// When the policy directory is not writable (the read-only-filesystem case,
+/// e.g. `/etc` mounted read-only), the IO-error arm must surface an actionable
+/// hint: the offending path, the `GHBRK_POLICY` env var, and a writable example
+/// path. The in-memory handle must remain untouched.
+#[tokio::test]
+async fn readonly_policy_dir_denies_with_actionable_hint() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fx = Fixture::new();
+    let dir = fx.policy_path.parent().unwrap().to_path_buf();
+    let original = std::fs::metadata(&dir).unwrap().permissions();
+    // Strip write bits so the atomic temp-file create inside the dir fails.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let frames = run_allow(&fx, &root_identity(), &["acme/web", "write"]).await;
+
+    // Restore permissions before any assertion so TempDir can clean up.
+    std::fs::set_permissions(&dir, original).unwrap();
+
+    let reason = denied_reason(&frames).expect("read-only policy dir should deny");
+    assert!(
+        reason.contains(&fx.policy_path.display().to_string()),
+        "hint must name the policy path: {reason}"
+    );
+    assert!(
+        reason.contains("GHBRK_POLICY"),
+        "hint must reference the GHBRK_POLICY env var: {reason}"
+    );
+    assert!(
+        reason.contains("/var/etc/ghbrk/policy.yaml"),
+        "hint must suggest a writable example path: {reason}"
+    );
+    // The in-memory policy must not have been swapped on the error path.
+    assert!(
+        fx.handle.load_full().rules.is_empty(),
+        "in-memory policy must be untouched on the IO-error path"
+    );
+}
+
+/// A writable `GHBRK_POLICY` path (the default temp-dir fixture) must allow
+/// the root peer to append a rule and hot-reload the in-memory handle.
+/// This is the counterpart to `readonly_policy_dir_denies_with_actionable_hint`.
+#[tokio::test]
+async fn allow_writes_to_writable_policy_path() {
+    let fx = Fixture::new();
+    let frames = run_allow(&fx, &root_identity(), &["acme/myapp", "release_create"]).await;
+    assert_eq!(
+        last_exit(&frames),
+        Some(0),
+        "expected exit 0 for writable policy path: {frames:?}"
+    );
+
+    let loaded = fx.loaded();
+    assert_eq!(
+        loaded.rules.len(),
+        1,
+        "policy file must have 1 rule after allow"
+    );
+    let rule = &loaded.rules[0];
+    assert_eq!(rule.org, "acme");
+    assert_eq!(rule.repo, "myapp");
+
+    let live = fx.handle.load_full();
+    assert_eq!(
+        live.rules.len(),
+        1,
+        "in-memory handle must reflect hot-reload"
+    );
+}
+
 /// The daemon-unreachable path is a CLI concern, exercised here by confirming a
 /// connection to a non-existent socket fails fast (the broker side never sees
 /// it). This guards the contract the CLI relies on.

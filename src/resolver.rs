@@ -734,6 +734,23 @@ mod argv_tests {
     }
 
     #[test]
+    fn classify_gh_release_create_with_target_and_asset() {
+        let op = classify_gh(&s(&[
+            "release",
+            "create",
+            "v1.0.0",
+            "--target",
+            "main",
+            "--title",
+            "v1.0.0",
+            "--generate-notes",
+            "/tmp/myapp-1.0.0.tar.gz",
+        ]))
+        .unwrap();
+        assert_eq!(op, Operation::ReleaseCreate);
+    }
+
+    #[test]
     fn extract_repo_short_flag() {
         assert_eq!(
             extract_repo_flag(&s(&["pr", "create", "-R", "other/proj"])),
@@ -938,5 +955,32 @@ mod hint_tests {
             matches!(err, ResolverError::NoRepoContext(_)),
             "expected NoRepoContext, got {err:?}"
         );
+    }
+
+    /// `gh release create` with flags and a trailing asset path resolves to
+    /// `ReleaseCreate` and extracts org/repo from the URL hint.
+    #[test]
+    fn resolve_gh_release_create_with_target_and_asset_from_cwd_remote() {
+        let tmp = std::env::temp_dir().join("ghbrk_hint_test_release_create_asset");
+        let result = resolve_gh(
+            &s(&[
+                "release",
+                "create",
+                "v1.0.0",
+                "--target",
+                "main",
+                "--title",
+                "v1.0.0",
+                "--generate-notes",
+                "/tmp/myapp-1.0.0.tar.gz",
+            ]),
+            &tmp,
+            Some("https://github.com/acme/myapp.git"),
+            None,
+        );
+        let resolved = result.expect("gh release create with url hint should succeed");
+        assert_eq!(resolved.org, "acme");
+        assert_eq!(resolved.repo, "myapp");
+        assert_eq!(resolved.operation, Operation::ReleaseCreate);
     }
 }

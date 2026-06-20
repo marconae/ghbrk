@@ -55,8 +55,29 @@ fn systemd_unit_hardening_directives() {
         "service must have ProtectSystem=strict"
     );
     assert!(
-        service.contains("PrivateTmp=true"),
-        "service must have PrivateTmp=true"
+        service.contains("ProtectKernelTunables=true"),
+        "service must have ProtectKernelTunables=true"
+    );
+    assert!(
+        service.contains("ProtectKernelModules=true"),
+        "service must have ProtectKernelModules=true"
+    );
+    assert!(
+        service.contains("ProtectControlGroups=true"),
+        "service must have ProtectControlGroups=true"
+    );
+}
+
+#[test]
+fn unit_has_no_private_tmp() {
+    let service = read_service();
+    assert!(
+        !service.contains("PrivateTmp="),
+        "service must NOT contain any PrivateTmp= directive (shared /tmp required for gh release create asset uploads)"
+    );
+    assert!(
+        service.contains("shared /tmp"),
+        "service must contain an explanatory comment about shared /tmp"
     );
 }
 
@@ -321,5 +342,53 @@ fn provision_user_creates_ghbrk_owned_id_rsa() {
     assert!(
         script.contains("id_rsa") || script.contains("ID_RSA"),
         "provision-user.sh must reference id_rsa"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Talos platform patch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn platform_patch_sets_writable_policy_path() {
+    let path = workspace_root().join("deploy/talos/ghbrk-policy-path.yaml");
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    serde_yaml::from_str::<serde_yaml::Value>(&text)
+        .unwrap_or_else(|e| panic!("deploy/talos/ghbrk-policy-path.yaml is not valid YAML: {e}"));
+    assert!(
+        text.contains("GHBRK_POLICY=/var/etc/ghbrk/policy.yaml"),
+        "patch must set GHBRK_POLICY=/var/etc/ghbrk/policy.yaml"
+    );
+    assert!(
+        text.contains("/var/etc/ghbrk"),
+        "patch must provision the /var/etc/ghbrk directory"
+    );
+    assert!(
+        text.contains("ghbrk"),
+        "patch must reference the ghbrk owner"
+    );
+}
+
+#[test]
+fn docs_describe_readonly_etc_workaround() {
+    let path = workspace_root().join("deploy/talos/README.md");
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    assert!(
+        text.contains("GHBRK_POLICY"),
+        "README must mention GHBRK_POLICY"
+    );
+    assert!(
+        text.contains("/var/etc/ghbrk/policy.yaml"),
+        "README must reference /var/etc/ghbrk/policy.yaml"
+    );
+    assert!(
+        text.to_ascii_lowercase().contains("read-only"),
+        "README must describe the read-only /etc constraint"
+    );
+    assert!(
+        text.contains("ghbrk-clients"),
+        "README must mention ghbrk-clients group prerequisite"
     );
 }
