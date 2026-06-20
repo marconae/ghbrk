@@ -2,8 +2,6 @@
 
 <img src="assets/logo.svg" alt="ghbrk Logo" width="200">
 
-# ghbrk
-
 **A credential broker for AI coding agents on Linux**
 
 [![CI](https://github.com/marconae/ghbrk/actions/workflows/ci.yml/badge.svg)](https://github.com/marconae/ghbrk/actions/workflows/ci.yml)

@@ -10,6 +10,15 @@ SERVICE_DST="/etc/systemd/system/ghbrk.service"
 TMPFILES_DST="/etc/tmpfiles.d/ghbrk.conf"
 POLICY_DST="/etc/ghbrk/policy.yaml"
 
+INSTALL_CLAUDE=1
+INSTALL_CODEX=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-claude) INSTALL_CLAUDE=0 ;;
+        --no-codex)  INSTALL_CODEX=0  ;;
+    esac
+done
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: this installer must run as root (use sudo)." >&2
     exit 1
@@ -166,6 +175,53 @@ if [ -n "$INVOKER" ]; then
 else
     echo "NOTE: not invoked via sudo; add operators manually:"
     echo "      sudo usermod -aG ghbrk-clients <username>"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. Agent integration (Claude Code + Codex)
+# ---------------------------------------------------------------------------
+if [ -n "$INVOKER" ]; then
+    INVOKER_HOME=$(getent passwd "$INVOKER" | cut -d: -f6)
+
+    if [ "$INSTALL_CLAUDE" -eq 1 ] && [ -n "$INVOKER_HOME" ]; then
+        CLAUDE_DIR="${INVOKER_HOME}/.claude"
+        install -d -m 0755 -o "$INVOKER" -g "$INVOKER" "${CLAUDE_DIR}"
+        curl -fsSL "https://raw.githubusercontent.com/${REPO}/${VERSION}/ghbrk.md" \
+            -o "${CLAUDE_DIR}/ghbrk.md"
+        chown "${INVOKER}:${INVOKER}" "${CLAUDE_DIR}/ghbrk.md"
+        echo "Installed ${CLAUDE_DIR}/ghbrk.md"
+
+        CLAUDE_MD="${CLAUDE_DIR}/CLAUDE.md"
+        if [ ! -f "${CLAUDE_MD}" ]; then
+            printf '@ghbrk.md\n' > "${CLAUDE_MD}"
+            chown "${INVOKER}:${INVOKER}" "${CLAUDE_MD}"
+            echo "Created ${CLAUDE_MD} with @ghbrk.md"
+        elif ! grep -q '@ghbrk.md' "${CLAUDE_MD}"; then
+            { printf '@ghbrk.md\n'; cat "${CLAUDE_MD}"; } > "${CLAUDE_MD}.tmp"
+            mv "${CLAUDE_MD}.tmp" "${CLAUDE_MD}"
+            chown "${INVOKER}:${INVOKER}" "${CLAUDE_MD}"
+            echo "Prepended @ghbrk.md to ${CLAUDE_MD}"
+        else
+            echo "${CLAUDE_MD} already references @ghbrk.md, skipping."
+        fi
+    fi
+
+    if [ "$INSTALL_CODEX" -eq 1 ] && [ -n "$INVOKER_HOME" ]; then
+        CODEX_DIR="${INVOKER_HOME}/.codex"
+        install -d -m 0755 -o "$INVOKER" -g "$INVOKER" "${CODEX_DIR}"
+        AGENTS_MD="${CODEX_DIR}/AGENTS.md"
+        if ! grep -q 'ghbrk' "${AGENTS_MD}" 2>/dev/null; then
+            curl -fsSL "https://raw.githubusercontent.com/${REPO}/${VERSION}/ghbrk.md" \
+                >> "${AGENTS_MD}"
+            chown "${INVOKER}:${INVOKER}" "${AGENTS_MD}"
+            echo "Appended ghbrk instructions to ${AGENTS_MD}"
+        else
+            echo "${AGENTS_MD} already references ghbrk, skipping."
+        fi
+    fi
+else
+    echo "NOTE: not invoked via sudo; skipping agent integration."
+    echo "      Re-run as: sudo bash install.sh  or pass --no-claude --no-codex to skip."
 fi
 
 # ---------------------------------------------------------------------------
