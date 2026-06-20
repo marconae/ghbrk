@@ -80,10 +80,17 @@ Provides a `ghbrk doctor` subcommand that verifies, in one command, that the loc
 
 ### Scenario: All checks passing exits zero
 
-* *GIVEN* the daemon is reachable, the credentials are present with mode `0600`, the policy parses cleanly, and every audited file and directory — `/etc/ghbrk/`, `/etc/ghbrk/policy.yaml`, `/run/ghbrk/ghbrk.sock`, the credential directory, and the credential files — has its expected owner and a mode no broader than its expectation
+* *GIVEN* the daemon is reachable, the credentials are present with mode `0600`, and every audited file and directory — `/etc/ghbrk/`, `/etc/ghbrk/policy.yaml`, `/run/ghbrk/ghbrk.sock`, the credential directory, and the credential files — has its expected owner and a mode no broader than its expectation
 * *WHEN* the user runs `ghbrk doctor`
-* *THEN* the command MUST print one status line per check, each tagged `OK`
+* *THEN* the command MUST print one status line per check that was attempted, each tagged `OK`
 * *AND* the command MUST exit with status zero
+
+### Scenario: Policy file not readable by invoking user is silently skipped
+
+* *GIVEN* `/etc/ghbrk/policy.yaml` is owned by `ghbrk` with mode `0600` and the invoking user is not `ghbrk`
+* *WHEN* the user runs `ghbrk doctor`
+* *THEN* the command MUST NOT print any `Policy:` parse line
+* *AND* the command MUST exit with status zero (the `Policy permissions: OK` line already confirms the file exists and is correctly locked down)
 
 ### Scenario: Warnings without errors still exit zero
 
