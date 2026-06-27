@@ -25,6 +25,9 @@ curl -fsSL https://raw.githubusercontent.com/marconae/ghbrk/main/install.sh | su
 > [!NOTE]
 > Requires Linux with systemd and an x86_64 CPU. See [Installation](./docs/install.md) for credential setup and policy configuration.
 
+> [!NOTE]
+> **Agent wiring included.** The installer places `ghbrk.md` in `~/.claude/` and prepends `@ghbrk.md` to `~/.claude/CLAUDE.md` (Claude Code), and appends it to `~/.codex/AGENTS.md` (Codex). Agents learn which operations require the `ghbrk` prefix automatically. To change what agents see, edit [`ghbrk.md`](./ghbrk.md) in this repo — not the README. Pass `--no-claude` or `--no-codex` to skip wiring.
+
 ---
 
 ## Why I Built It
