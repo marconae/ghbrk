@@ -11,11 +11,7 @@
 accepted = [
     "MIT",
     "Apache-2.0",
-    "BSD-3-Clause",
-    "ISC",
     "Unicode-3.0",
-    "Zlib",
-    "CDLA-Permissive-2.0",
 ]
 
 # Restrict the dependency graph to the release target so that Windows-only or

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.0]
+
+### Added
+- Dependency license compliance checks cover MIT, Apache-2.0, and Unicode-3.0.
+
 ## [0.1.0]
 
 ### Added
