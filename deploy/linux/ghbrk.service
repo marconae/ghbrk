@@ -1,0 +1,36 @@
+[Unit]
+Description=ghbrk — privilege-separated git/gh broker
+After=network.target
+
+[Service]
+Type=simple
+User=ghbrk
+Group=ghbrk-clients
+ExecStart=/usr/local/bin/ghbrk daemon
+Environment=GHBRK_POLICY=/etc/ghbrk/policy.yaml
+Environment=GHBRK_AUDIT_LOG=/var/log/ghbrk/audit.log
+Environment=GHBRK_SOCKET=/run/ghbrk/broker.sock
+Environment=HOME=/run/ghbrk
+Restart=on-failure
+RestartSec=5s
+# Hardening
+NoNewPrivileges=true
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+ProtectSystem=strict
+# PrivateTmp is intentionally absent: the broker spawns gh as a child that must read
+# user-supplied release asset files from the shared /tmp (e.g. /tmp/myapp-1.0.0.tar.gz).
+# A private /tmp namespace would hide those files from the child process.
+# /etc/ghbrk is writable because the daemon is the sole, privilege-gated writer of the
+# mode-0600 policy file at /etc/ghbrk/policy.yaml (atomic rewrite on policy update); widening
+# write access to just this owner-restricted subdirectory does not meaningfully weaken the
+# ProtectSystem=strict hardening applied to the rest of /etc.
+ReadWritePaths=/run/ghbrk /var/log/ghbrk /etc/ghbrk
+# Required: user-impersonated child processes must write to repos under $HOME.
+ProtectHome=no
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+FROM python:3-slim
+COPY mock_github_api.py /app/mock_github_api.py
+ENTRYPOINT ["python3", "/app/mock_github_api.py"]

@@ -1,0 +1,34 @@
+# Minimal SSH-accessible bare git server for ghbrk integration tests.
+# Pinned to debian:bookworm-slim for reproducibility.
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-server git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create the runtime dirs sshd needs and the unprivileged git user. We use
+# git-shell as the login shell so the only thing the keyholder can do is run
+# git over SSH.
+RUN mkdir -p /var/run/sshd /home/git \
+ && useradd --system --create-home --home-dir /home/git --shell /usr/bin/git-shell git \
+ && mkdir -p /home/git/.ssh \
+ && chmod 700 /home/git/.ssh \
+ && touch /home/git/.ssh/authorized_keys \
+ && chmod 600 /home/git/.ssh/authorized_keys \
+ && chown -R git:git /home/git
+
+# Pre-create the bare repo the tests push to / clone from.
+RUN mkdir -p /home/git/repos \
+ && git init --bare -b main /home/git/repos/test.git \
+ && chown -R git:git /home/git/repos
+
+# Pubkey-only authentication. StrictModes off so a bind-mount or volume with
+# permissive perms still authenticates correctly inside CI sandboxes.
+RUN sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+ && sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/'  /etc/ssh/sshd_config \
+ && echo 'StrictModes no' >> /etc/ssh/sshd_config \
+ && ssh-keygen -A
+
+EXPOSE 22
+
+CMD ["/usr/sbin/sshd", "-D", "-e"]
