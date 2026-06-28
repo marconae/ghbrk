@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.0]
+
+### Added
+- Release pipeline generates a third-party license notice file as part of every tagged build.
+
 ## [0.2.0]
 
 ### Added
