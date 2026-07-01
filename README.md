@@ -38,9 +38,7 @@ For example, when an agent:
 - reads `~/.ssh/config` or `~/.ssh/id_rsa` to figure out how to push — your private key ends up in the context window
 - runs `echo $GITHUB_TOKEN` to debug a failing `gh` call — your token lands in the session transcript
 
-And if you work inside a GitHub organisation, there are no fine-grained PATs scoped to a single repository. A token that lets an agent open a pull request in one repo can do the same in every repo the token has access to.
-
-So I built `ghbrk`.
+So I built `ghbrk` to prevent agents from getting access to your GitHub credentials.
 
 The daemon holds your SSH key and GitHub token. Agents never see them. Every remote git and gh operation is checked against a policy you control, and every decision is logged.
 
