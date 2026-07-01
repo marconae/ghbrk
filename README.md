@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/marconae/ghbrk/main/install.sh | su
 > **Agent wiring included.** The installer places `ghbrk.md` in `~/.claude/` and prepends `@ghbrk.md` to `~/.claude/CLAUDE.md` (Claude Code), and appends it to `~/.codex/AGENTS.md` (Codex). Agents learn which operations require the `ghbrk` prefix automatically. Pass `--no-claude` or `--no-codex` to skip wiring.
 
 > [!IMPORTANT]
-> Requires Linux with systemd and an x86_64 CPU. See [Installation](./docs/install.md) for credential setup and policy configuration.
+> Requires Linux with `systemd` and an `x86_64` CPU. See [Installation](./docs/install.md) for credential setup and policy configuration.
 
 ---
 
@@ -65,7 +65,7 @@ If you are an agentic engineer running autonomous agents — coding assistants, 
     ├─ checks policy ──── allow → runs git / gh with credentials injected
     │                              streams output back to the agent
     │
-    └─────────────────── deny  → returns error, logs the decision
+    └──────────────────── deny  → returns error, logs the decision
 ```
 
 1. **Agents call `ghbrk` explicitly** for remote operations. Local commands (`git status`, `git commit`) run as usual, without going through the broker.
