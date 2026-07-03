@@ -10,9 +10,40 @@
 [![spec|driven](https://img.shields.io/badge/spec-driven-blue)](specs/)
 [![agentic|engineering](https://img.shields.io/badge/agentic-engineering-purple)](https://deliberate.codes)
 
-[Getting Started](#getting-started) • [Why](#why-i-built-it) • [How It Works](#how-does-it-work) • [Documentation](./docs/)
+[Getting Started](#getting-started) • [Why](#why-i-built-it) • [How It Works](#how-it-works) • [Documentation](./docs/)
 
 </div>
+
+---
+
+## How It Works
+
+Your SSH key and GitHub token live in `/etc/ghbrk/credentials/$USER`, a directory owned by the `ghbrk` system user, mode `0600`; your agent's own Unix account cannot read it. `ghbrk` doesn't intercept your git commands; you call it explicitly for the operations that need those credentials.
+
+```bash
+$ git commit -m "fix: correct retry backoff"
+[main e4f5a6b] fix: correct retry backoff
+
+# A plain push fails: the agent's Unix user holds no SSH key.
+$ git push origin main
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+
+# Ask ghbrk what it would do — nothing leaves the machine.
+$ ghbrk explain git push origin main
+tool:      git push
+operation: push
+repo:      acme/platform
+branch:    main
+policy:    allow
+inject:    SSH credential
+
+# Broker the push
+$ ghbrk git push origin main
+...
+To github.com:acme/platform.git
+   1a2b3c4..e4f5a6b  main -> main
+```
 
 ---
 
@@ -50,7 +81,7 @@ If you are an agentic engineer running autonomous agents — coding assistants, 
 
 ---
 
-## How Does It Work?
+## Architecture
 
 ```
   Agent
