@@ -4,7 +4,7 @@ Defines the systemd service unit for the ghbrk daemon: how the unit starts the p
 
 ## Background
 
-The unit file lives at `deploy/linux/ghbrk.service`. To let the daemon drop spawned children to the requesting user, the unit grants exactly `CAP_SETUID` and `CAP_SETGID` (via `AmbientCapabilities` and `CapabilityBoundingSet`) and sets `ProtectHome=no` so user-owned children can write repositories under user home directories. `NoNewPrivileges=true` is retained: it does not block `setuid(2)`/`setgid(2)` when the capability is already held, and it still prevents SUID-binary escalation. All other hardening directives are unchanged.
+The unit file lives at `deploy/linux/ghbrk.service`. To let the daemon drop spawned children to the requesting user, the unit grants exactly `CAP_SETUID` and `CAP_SETGID` (via `AmbientCapabilities` and `CapabilityBoundingSet`) and sets `ProtectHome=no` so user-owned children can write repositories under user home directories. `NoNewPrivileges=true` is retained: it does not block `setuid(2)`/`setgid(2)` when the capability is already held, and it still prevents SUID-binary escalation. `ProtectSystem=strict` makes `/usr`, `/boot`, and `/etc` read-only inside the daemon's private mount namespace, so every path the daemon must write to has to be re-granted via `ReadWritePaths=`; the default policy path is `Environment=GHBRK_POLICY=/etc/ghbrk/policy.yaml`, and the broker is the sole writer of that file, performing an atomic temp-file-plus-rename inside its parent directory, so `ReadWritePaths=` additionally includes `/etc/ghbrk` alongside `/run/ghbrk` and `/var/log/ghbrk`. All other hardening directives are unchanged.
 
 ## Scenarios
 
@@ -55,3 +55,12 @@ The unit file lives at `deploy/linux/ghbrk.service`. To let the daemon drop spaw
 * *THEN* the unit MUST set `ProtectHome=no`
 * *AND* the unit MUST NOT set `ProtectHome=read-only`
 * *AND* the rationale MUST be that child processes spawned as the requesting user need write access to repositories under that user's home directory for `git fetch`/`git pull`
+
+### Scenario: systemd unit grants write access to the policy directory
+
+* *GIVEN* the systemd unit file `deploy/linux/ghbrk.service`
+* *AND* the daemon is the sole writer of the policy file at the default `GHBRK_POLICY` path `/etc/ghbrk/policy.yaml`
+* *WHEN* an operator inspects the `[Service]` section
+* *THEN* the unit MUST include `/etc/ghbrk` in its `ReadWritePaths=` directive so the broker can atomically rewrite `policy.yaml` under `ProtectSystem=strict`
+* *AND* the unit MUST retain `/run/ghbrk` and `/var/log/ghbrk` in `ReadWritePaths=`, because the `/etc/ghbrk` entry is additive and narrowly scoped to the ghbrk-owned config directory, consistent with the existing narrow-whitelist precedent rather than a blanket `/etc` grant
+* *AND* the unit MUST NOT relax `ProtectSystem=strict` or any other hardening directive to achieve the write, because widening one owner-restricted subdirectory (`ghbrk:ghbrk`, `policy.yaml` mode `0600`) is sufficient and does not weaken `/etc` hardening elsewhere

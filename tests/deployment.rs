@@ -131,6 +131,49 @@ fn service_has_runtime_directory() {
 }
 
 #[test]
+fn service_readwritepaths_includes_etc_ghbrk() {
+    let service = read_service();
+    let rwpaths_line = service
+        .lines()
+        .find(|line| line.starts_with("ReadWritePaths="))
+        .unwrap_or_else(|| panic!("service must contain a ReadWritePaths= line"));
+    assert!(
+        rwpaths_line.contains("/etc/ghbrk"),
+        "ReadWritePaths= must include /etc/ghbrk so the daemon can atomically rewrite \
+         policy.yaml under ProtectSystem=strict; got: {rwpaths_line}"
+    );
+}
+
+#[test]
+fn default_policy_dir_is_in_readwritepaths() {
+    let service = read_service();
+    let policy_line = service
+        .lines()
+        .find(|line| line.starts_with("Environment=GHBRK_POLICY="))
+        .unwrap_or_else(|| panic!("service must contain an Environment=GHBRK_POLICY= line"));
+    let policy_path = policy_line
+        .trim_start_matches("Environment=GHBRK_POLICY=")
+        .trim();
+    let policy_dir = PathBuf::from(policy_path)
+        .parent()
+        .unwrap_or_else(|| panic!("GHBRK_POLICY path {policy_path} has no parent directory"))
+        .to_str()
+        .unwrap_or_else(|| panic!("policy directory path is not valid UTF-8"))
+        .to_string();
+
+    let rwpaths_line = service
+        .lines()
+        .find(|line| line.starts_with("ReadWritePaths="))
+        .unwrap_or_else(|| panic!("service must contain a ReadWritePaths= line"));
+
+    assert!(
+        rwpaths_line.contains(&policy_dir),
+        "ReadWritePaths= must include the GHBRK_POLICY parent directory ({policy_dir}) so \
+         the policy path and the writable-paths whitelist cannot drift apart; got: {rwpaths_line}"
+    );
+}
+
+#[test]
 fn tmpfiles_snippet_creates_run_ghbrk() {
     let tmpfiles = std::fs::read_to_string("deploy/linux/ghbrk.tmpfiles")
         .expect("deploy/linux/ghbrk.tmpfiles must exist");

@@ -813,3 +813,30 @@ The broker resolves the peer's passwd home directory and passes it on `ChildSpec
 ### Consequences
 
 The `pre_exec` closure is restricted to async-signal-safe syscalls (`setgroups`/`setgid`/`setuid`). All identity resolution (uid, gid, supplementary GIDs, home directory) is centralised in the broker's `peer_identity()` function and carried on `ChildSpec`. The executor has no dependency on passwd/group lookups.
+
+---
+
+## ADR-030: Whitelist `/etc/ghbrk` in `ReadWritePaths=` rather than migrate the policy path
+
+**Date:** 2026-07-03
+**Plan:** `fix-policy-dir-readwrite`
+**Status:** Accepted
+
+### Context
+
+`ProtectSystem=strict` makes `/etc` read-only inside the daemon's private mount namespace. The default policy path is `Environment=GHBRK_POLICY=/etc/ghbrk/policy.yaml`, and the broker is the sole writer of that file via an atomic temp-file-plus-rename. The unit's `ReadWritePaths=/run/ghbrk /var/log/ghbrk` never included `/etc/ghbrk`, so every `sudo ghbrk allow` on a stock Linux install failed with `Read-only file system (os error 30)`.
+
+### Decision
+
+Add `/etc/ghbrk` to the unit's existing `ReadWritePaths=/run/ghbrk /var/log/ghbrk`, keeping the default `GHBRK_POLICY=/etc/ghbrk/policy.yaml` unchanged.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Whitelist `/etc/ghbrk` in `ReadWritePaths=` | ✓ Chosen — minimal, additive change; keeps the conventional path; matches the established narrow-whitelist precedent; the widened directory is owner-restricted (`ghbrk:ghbrk`, `policy.yaml` mode `0600`) and the daemon is its sole privilege-gated writer, so `ProtectSystem=strict` hardening elsewhere is preserved |
+| Migrate the default policy path to `/var/etc/ghbrk/policy.yaml` (the Talos workaround from commit `f7769d3`) | ✗ Rejected — larger diff spanning install.sh, README, and multiple existing specs for no user-visible benefit; abandons the conventional `/etc` config location |
+
+### Consequences
+
+`sudo ghbrk allow <org>/<repo> <op>` succeeds on a stock Linux install using the conventional `/etc/ghbrk/policy.yaml` path. The deployment feature's regression test derives the policy directory from the `GHBRK_POLICY` value declared in the unit and asserts that directory is present in `ReadWritePaths=`, so the two settings cannot silently drift apart. The Talos `/var/etc/ghbrk` workaround remains unchanged and Talos-specific, since Talos has a genuinely read-only `/etc` at the host level.

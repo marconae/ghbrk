@@ -6,6 +6,8 @@ Provides the artefacts an operator needs to install and run ghbrk on a Linux hos
 
 With executor privilege drop in place, setup no longer requires loosening home directory permissions. The README and install script MUST NOT instruct operators to run `chmod o+x ~`, because brokered git operations run as the requesting user and traverse the home directory with that user's own permissions. Targets Linux only in v1.
 
+`deploy/linux/install.sh` provisions `/etc/ghbrk/policy.yaml` (the default `GHBRK_POLICY` path) with owner `ghbrk:ghbrk` and mode `0600`. Because the daemon runs under `ProtectSystem=strict`, the default deployment only works end-to-end if the systemd unit's `ReadWritePaths=` includes the directory holding that policy file, so the provisioned policy path and the unit's writable paths must agree.
+
 ## Scenarios
 
 ### Scenario: install.sh creates ghbrk system user
@@ -113,4 +115,13 @@ With executor privilege drop in place, setup no longer requires loosening home d
 * *WHEN* that user attempts an OS-level write to the file, e.g. `echo '' >> /etc/ghbrk/policy.yaml`
 * *THEN* the operating system MUST reject the write with a permission-denied error
 * *AND* the file content MUST remain unchanged
+
+### Scenario: default policy path is writable by the daemon under sandboxing
+
+* *GIVEN* a stock Linux host provisioned by `deploy/linux/install.sh`
+* *AND* `install.sh` creates `/etc/ghbrk/policy.yaml` (the default `GHBRK_POLICY` path) with owner `ghbrk:ghbrk` and mode `0600`
+* *WHEN* an operator runs `sudo ghbrk allow <org>/<repo> <operation>`
+* *THEN* the broker MUST be able to atomically rewrite `/etc/ghbrk/policy.yaml` rather than failing with `Read-only file system (os error 30)`
+* *AND* the write MUST succeed because the systemd unit's `ReadWritePaths=` directive includes the parent directory of the default `GHBRK_POLICY` path
+* *AND* the directory named in `ReadWritePaths=` MUST match the parent of the `GHBRK_POLICY` value declared in `deploy/linux/ghbrk.service`, so the install-provisioned policy path and the unit's writable paths never drift apart
 
