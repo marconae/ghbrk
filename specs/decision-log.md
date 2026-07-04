@@ -835,8 +835,8 @@ Add `/etc/ghbrk` to the unit's existing `ReadWritePaths=/run/ghbrk /var/log/ghbr
 | Option | Verdict |
 |--------|---------|
 | Whitelist `/etc/ghbrk` in `ReadWritePaths=` | ✓ Chosen — minimal, additive change; keeps the conventional path; matches the established narrow-whitelist precedent; the widened directory is owner-restricted (`ghbrk:ghbrk`, `policy.yaml` mode `0600`) and the daemon is its sole privilege-gated writer, so `ProtectSystem=strict` hardening elsewhere is preserved |
-| Migrate the default policy path to `/var/etc/ghbrk/policy.yaml` (the Talos workaround from commit `f7769d3`) | ✗ Rejected — larger diff spanning install.sh, README, and multiple existing specs for no user-visible benefit; abandons the conventional `/etc` config location |
+| Migrate the default policy path to `/var/etc/ghbrk/policy.yaml` (the immutable-`/etc` host workaround from commit `f7769d3`) | ✗ Rejected — larger diff spanning install.sh, README, and multiple existing specs for no user-visible benefit; abandons the conventional `/etc` config location |
 
 ### Consequences
 
-`sudo ghbrk allow <org>/<repo> <op>` succeeds on a stock Linux install using the conventional `/etc/ghbrk/policy.yaml` path. The deployment feature's regression test derives the policy directory from the `GHBRK_POLICY` value declared in the unit and asserts that directory is present in `ReadWritePaths=`, so the two settings cannot silently drift apart. The Talos `/var/etc/ghbrk` workaround remains unchanged and Talos-specific, since Talos has a genuinely read-only `/etc` at the host level.
+`sudo ghbrk allow <org>/<repo> <op>` succeeds on a stock Linux install using the conventional `/etc/ghbrk/policy.yaml` path. The deployment feature's regression test derives the policy directory from the `GHBRK_POLICY` value declared in the unit and asserts that directory is present in `ReadWritePaths=`, so the two settings cannot silently drift apart. The now-removed `/var/etc/ghbrk` workaround was specific to hosts with an immutable `/etc` and is unaffected by this change.

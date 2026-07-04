@@ -10,7 +10,6 @@
 ## [1.1.2]
 
 ### Added
-- Talos Linux support in the deploy scripts.
 - `ghbrk.md` agent instructions, wiring Claude and Codex on install.
 
 ### Fixed
