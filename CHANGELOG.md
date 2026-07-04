@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [1.1.3]
+
+### Fixed
+- `/etc/ghbrk` whitelisted in the systemd unit's `ReadWritePaths` — `sudo ghbrk allow` no longer fails with `Read-only file system (os error 30)` on stock Linux installs.
+
+## [1.1.2]
+
+### Added
+- Talos Linux support in the deploy scripts.
+- `ghbrk.md` agent instructions, wiring Claude and Codex on install.
+
+### Fixed
+- Actionable hint on read-only policy errors; dropped `PrivateTmp` from the systemd unit.
+- Integration tests mount the local `ghbrk.md` instead of downloading it from a release tag.
+
+## [1.1.0]
+
+### Added
+- `ghbrk allow`: manage per-repo allow-lists, with role-based policy evaluation (owner/member/guest).
+- Project logo added to the README and repo assets.
+
+### Changed
+- **Policy file format** (breaking): now requires a `roles` section.
+- Replaced the `ring` crate with `aws-lc-rs`; tightened the dependency license allow-list.
+
+### Fixed
+- `doctor`: corrected credential directory mode and policy error message; silenced the policy check for unprivileged users.
+
 ## [1.0.3]
 
 ### Fixed
