@@ -7,7 +7,7 @@
   - `ghbrk git fetch` / `ghbrk git pull` / `ghbrk git clone <url>`
   - `ghbrk gh pr create` / `ghbrk gh pr merge` / `ghbrk gh pr comment`
   - `ghbrk gh issue create` / `ghbrk gh issue comment`
-  - `ghbrk gh release create`
+  - `ghbrk gh release create` / `delete` / `edit` / `upload` / `delete-asset` / `list` / `view` / `download`
   - `ghbrk gh api <endpoint>`
 - **Local — plain git, no prefix**: `git status`, `git add`, `git commit`, `git log`,
   `git diff`, `git checkout`, `git merge`, `git rebase` (local-only rebases)

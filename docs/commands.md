@@ -59,6 +59,8 @@ ghbrk allow acme/platform push fetch pull
 ghbrk allow acme/platform pr_open pr_comment
 ```
 
+Built-in roles: `read-only`, `write`, `maintain`, `admin` — see [Policy Reference](./policy.md#built-in-roles).
+
 ## `ghbrk daemon`
 
 Starts the broker server. Normally managed by systemd; you do not need to invoke this manually.

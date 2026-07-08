@@ -36,7 +36,7 @@
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Optional roles: section — define or override named operation sets.
-# Built-in roles (read-only, write, admin) are always available and can be
+# Built-in roles (read-only, write, maintain, admin) are always available and can be
 # referenced in any rule without declaring them here.  Declare a role here to
 # override a built-in or to introduce a completely new role.
 # ─────────────────────────────────────────────────────────────────────────────

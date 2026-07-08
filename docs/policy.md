@@ -55,6 +55,22 @@ sudo systemctl restart ghbrk
 
 ---
 
+## Built-in roles
+
+`operations` in a rule can be a role name instead of an explicit list. Four
+built-in roles are always available without declaring them in `roles:`:
+
+| Role | Operations |
+|------|-----------|
+| `read-only` | `fetch`, `clone`, `pull`, `pr_review`, `gh_api_read`, `release_list`, `release_view`, `release_download` |
+| `write` | `read-only` + `push`, `pr_open`, `pr_comment`, `pr_close`, `pr_merge`, `issue_open`, `issue_comment`, `issue_close` |
+| `maintain` | `write` + `release_create`, `release_delete`, `release_edit`, `release_upload`, `release_delete_asset` |
+| `admin` | same as `maintain` (structurally identical today; reserved for future admin-only operations) |
+
+Grant a role to a user with `ghbrk allow <org>/<repo> <user> <role>`.
+
+---
+
 ## Operations reference
 
 Use these names in the `operations` list of your policy rules.

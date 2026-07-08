@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.2.0]
+
+### Added
+- Full `gh release` lifecycle governance: `release delete`, `release edit`, `release upload`, `release delete-asset`, `release list`, `release view`, and `release download` are now classified and policy-gated. Previously `delete`/`edit`/`upload`/`delete-asset` executed ungoverned via passthrough — any authenticated caller could delete or rewrite a release with no policy check; this closes that gap.
+- New `maintain` built-in role (between `write` and `admin`) carrying all release-management operations; `release_create` moves out of admin-only into `maintain`. `admin` remains a structural superset.
 
 ## [1.1.3]
 
