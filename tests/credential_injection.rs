@@ -50,16 +50,38 @@ rules:
     Policy::from_yaml(&yaml).unwrap()
 }
 
+/// Restores the process-wide `PATH` env var on drop, so a test's PATH
+/// mutation doesn't leak into other tests running concurrently in this
+/// binary. See `tests/broker_server.rs::PathGuard` for the same pattern.
+struct PathGuard {
+    original: Option<String>,
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
 /// Place a stub `gh` on PATH that prints its `GH_TOKEN` to stdout.
-fn install_stub_gh(dir: &std::path::Path) {
+///
+/// Returns a guard that restores the original `PATH` when dropped; keep it
+/// alive for the duration of the test.
+#[must_use]
+fn install_stub_gh(dir: &std::path::Path) -> PathGuard {
     let script = dir.join("gh");
     write_mode(
         &script,
         "#!/bin/sh\nprintf 'argv=%s GH_TOKEN=%s' \"$*\" \"$GH_TOKEN\"\n",
         0o755,
     );
-    let prev = std::env::var("PATH").unwrap_or_default();
+    let original = std::env::var("PATH").ok();
+    let prev = original.clone().unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{}", dir.display(), prev));
+    PathGuard { original }
 }
 
 async fn collect_stdout(stream: &mut UnixStream) -> String {
@@ -87,7 +109,7 @@ async fn gh_api_receives_gh_token() {
     write_mode(&user_dir.join("token"), TOKEN, 0o600);
 
     let bin_dir = TempDir::new().unwrap();
-    install_stub_gh(bin_dir.path());
+    let _path_guard = install_stub_gh(bin_dir.path());
 
     let run_dir = TempDir::new().unwrap();
     let socket_path = run_dir.path().join("broker.sock");
@@ -147,7 +169,7 @@ async fn gh_passthrough_repo_view_receives_token() {
     write_mode(&user_dir.join("token"), TOKEN, 0o600);
 
     let bin_dir = TempDir::new().unwrap();
-    install_stub_gh(bin_dir.path());
+    let _path_guard = install_stub_gh(bin_dir.path());
 
     let run_dir = TempDir::new().unwrap();
     let socket_path = run_dir.path().join("broker.sock");

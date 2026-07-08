@@ -773,14 +773,16 @@ fn parse_operations_spec(operands: &[&str]) -> Result<OperationsSpec, String> {
 
 /// True when `name` resolves as a role in the built-in vocabulary. A standalone
 /// helper backed by an empty policy: it covers the built-ins (`read-only`,
-/// `write`, `admin`) that exist without declaration, which is what the operand
-/// classifier needs before the live-policy validation step.
+/// `write`, `maintain`, `admin`) that exist without declaration, which is what
+/// the operand classifier needs before the live-policy validation step.
 fn is_known_role(name: &str) -> bool {
     Operation::parse(name).is_none() && BUILTIN_ROLE_NAMES.contains(&name)
 }
 
-/// Built-in role names available without declaration. Mirrors `policy.rs`.
-const BUILTIN_ROLE_NAMES: &[&str] = &["read-only", "write", "admin"];
+/// Built-in role names available without declaration. Mirrors `builtin_roles()`
+/// in `policy.rs`, in inheritance order (`read-only` ⊂ `write` ⊂ `maintain` ⊂
+/// `admin`).
+const BUILTIN_ROLE_NAMES: &[&str] = &["read-only", "write", "maintain", "admin"];
 
 /// Validate the parsed operations against the live policy. For a role
 /// reference, the role must resolve in the current policy (user-defined roles
@@ -873,6 +875,9 @@ async fn audit_allow(
 /// Returns `true` when a `gh` invocation is a broker-mediated operation
 /// (subject to resolve + policy). When `false`, the broker treats it as a
 /// passthrough: it still injects `GH_TOKEN` but bypasses resolve and policy.
+/// All `gh release` lifecycle subcommands (create, delete, delete-asset,
+/// download, edit, list, upload, view) are broker-mediated; other read-only
+/// invocations such as `gh repo view` or `gh auth status` remain passthrough.
 fn gh_is_broker_op(args: &[String]) -> bool {
     let mut positional = args.iter().filter(|a| !a.starts_with('-'));
     let group = positional.next().map(String::as_str).unwrap_or("");
@@ -891,6 +896,13 @@ fn gh_is_broker_op(args: &[String]) -> bool {
             | ("issue", "comment")
             | ("issue", "close")
             | ("release", "create")
+            | ("release", "delete")
+            | ("release", "delete-asset")
+            | ("release", "download")
+            | ("release", "edit")
+            | ("release", "list")
+            | ("release", "upload")
+            | ("release", "view")
     )
 }
 
@@ -1325,6 +1337,13 @@ fn operation_name(op: &Operation) -> &'static str {
         Operation::IssueComment => "issue_comment",
         Operation::IssueClose => "issue_close",
         Operation::ReleaseCreate => "release_create",
+        Operation::ReleaseDelete => "release_delete",
+        Operation::ReleaseEdit => "release_edit",
+        Operation::ReleaseUpload => "release_upload",
+        Operation::ReleaseDeleteAsset => "release_delete_asset",
+        Operation::ReleaseList => "release_list",
+        Operation::ReleaseView => "release_view",
+        Operation::ReleaseDownload => "release_download",
         Operation::GhApiRead { .. } => "gh_api_read",
     }
 }
@@ -1438,6 +1457,28 @@ mod tests {
         ])));
         assert!(gh_is_broker_op(&s(&["issue", "close", "1"])));
         assert!(gh_is_broker_op(&s(&["release", "create", "v1.0.0"])));
+        assert!(gh_is_broker_op(&s(&[
+            "release", "delete", "v1.0.0", "--yes"
+        ])));
+        assert!(gh_is_broker_op(&s(&[
+            "release",
+            "delete-asset",
+            "v1.0.0",
+            "asset.tar.gz",
+            "--yes"
+        ])));
+        assert!(gh_is_broker_op(&s(&["release", "download", "v1.0.0"])));
+        assert!(gh_is_broker_op(&s(&[
+            "release", "edit", "v1.0.0", "--title", "v1.0.0"
+        ])));
+        assert!(gh_is_broker_op(&s(&["release", "list"])));
+        assert!(gh_is_broker_op(&s(&[
+            "release",
+            "upload",
+            "v1.0.0",
+            "/tmp/asset.tar.gz"
+        ])));
+        assert!(gh_is_broker_op(&s(&["release", "view", "v1.0.0"])));
     }
 
     #[test]
@@ -1472,6 +1513,20 @@ mod tests {
             },
         ] {
             assert!(!operation_name(&op).is_empty(), "missing name for {op:?}");
+        }
+    }
+
+    #[test]
+    fn allow_accepts_every_builtin_role_as_operand() {
+        for role in ["read-only", "write", "maintain", "admin"] {
+            assert!(
+                is_known_role(role),
+                "'{role}' must classify as a built-in role"
+            );
+            match parse_operations_spec(&[role]) {
+                Ok(OperationsSpec::Role(name)) => assert_eq!(name, role),
+                other => panic!("expected '{role}' to parse as a role operand, got {other:?}"),
+            }
         }
     }
 }

@@ -74,6 +74,13 @@ Use these names in the `operations` list of your policy rules.
 | `issue_comment` | `ghbrk gh issue comment` | no |
 | `issue_close` | `ghbrk gh issue close` | no |
 | `release_create` | `ghbrk gh release create` | no |
+| `release_delete` | `ghbrk gh release delete` | no |
+| `release_edit` | `ghbrk gh release edit` | no |
+| `release_upload` | `ghbrk gh release upload` | no |
+| `release_delete_asset` | `ghbrk gh release delete-asset` | no |
+| `release_list` | `ghbrk gh release list` | no |
+| `release_view` | `ghbrk gh release view` | no |
+| `release_download` | `ghbrk gh release download` | no |
 | `gh_api_read` | `ghbrk gh api <path>` (GET) | no |
 
 Only `push` evaluates the `branches` field. For all other operations the `branches` field in a rule is ignored.
@@ -103,6 +110,7 @@ Every `ghbrk gh` invocation is relayed to the broker so that `GH_TOKEN` is alway
 | `pr create`, `pr comment`, `pr merge`, `pr close`, `pr review` | policy check → inject → exec |
 | `issue create`, `issue comment`, `issue close` | policy check → inject → exec |
 | `release create` | policy check → inject → exec |
+| `release delete`, `release edit`, `release upload`, `release delete-asset`, `release list`, `release view`, `release download` | policy check → inject → exec |
 | `api <path>` (GET only; `-X POST/PATCH/DELETE` rejected) | policy check → inject → exec |
 | `auth status`, `repo view`, `pr list`, `pr status`, and everything else | inject → exec (no policy check) |
 

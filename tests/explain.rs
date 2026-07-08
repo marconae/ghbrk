@@ -169,6 +169,86 @@ fn explain_git_push_deny() {
     );
 }
 
+/// `gh release delete` with a granting policy resolves to `release_delete`
+/// and reports an `allow` decision, proving the resolver no longer treats
+/// this subcommand as unsupported now that it is classified end-to-end.
+#[test]
+fn explain_gh_release_delete_allow() {
+    let policy = Policy::from_yaml(
+        "rules:\n  - user: \"*\"\n    org: \"*\"\n    repo: \"*\"\n    operations: [release_delete]\n    branches: [\"*\"]\n    effect: allow\n",
+    )
+    .unwrap();
+    let h = start_broker(policy);
+    let out = std::process::Command::new(bin())
+        .args([
+            "explain", "gh", "release", "delete", "v1.0.0", "--repo", "acme/web", "--yes",
+        ])
+        .env("GHBRK_SOCKET", &h.socket_path)
+        .output()
+        .expect("failed to run ghbrk explain gh release delete");
+    assert!(
+        out.status.success(),
+        "explain should exit 0 for resolved case: {:?} stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("operation: release_delete"),
+        "expected resolved operation in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("acme/web"),
+        "expected repo 'acme/web' in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("allow"),
+        "expected 'allow' in stdout: {stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("resolver error"),
+        "explain must not report a resolver error for a classified release verb: {stdout}"
+    );
+}
+
+/// `gh release delete` under a deny-all policy still resolves cleanly to
+/// `release_delete` and reports a `deny` decision — it must never fall back
+/// to a "not supported" resolver error, since that was the bug this plan
+/// fixes.
+#[test]
+fn explain_gh_release_delete_no_resolver_error() {
+    let h = start_broker(deny_all_policy());
+    let out = std::process::Command::new(bin())
+        .args([
+            "explain", "gh", "release", "delete", "v1.0.0", "--repo", "acme/web", "--yes",
+        ])
+        .env("GHBRK_SOCKET", &h.socket_path)
+        .output()
+        .expect("failed to run ghbrk explain gh release delete (deny)");
+    assert!(
+        out.status.success(),
+        "explain should exit 0 even for denied operations: {:?}",
+        out.status.code()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("operation: release_delete"),
+        "expected resolved operation in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("deny"),
+        "expected 'deny' in stdout: {stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("resolver error"),
+        "explain must not report a resolver error for a classified release verb: {stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("not supported"),
+        "explain must not report 'not supported' for a classified release verb: {stdout}"
+    );
+}
+
 #[test]
 fn explain_unknown_command_fails() {
     let h = start_broker(deny_all_policy());

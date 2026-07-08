@@ -424,6 +424,13 @@ fn classify_gh(args: &[String]) -> Result<Operation, ResolverError> {
         ("issue", "comment") => Operation::IssueComment,
         ("issue", "close") => Operation::IssueClose,
         ("release", "create") => Operation::ReleaseCreate,
+        ("release", "delete") => Operation::ReleaseDelete,
+        ("release", "delete-asset") => Operation::ReleaseDeleteAsset,
+        ("release", "download") => Operation::ReleaseDownload,
+        ("release", "edit") => Operation::ReleaseEdit,
+        ("release", "list") => Operation::ReleaseList,
+        ("release", "upload") => Operation::ReleaseUpload,
+        ("release", "view") => Operation::ReleaseView,
         ("api", "") => return Err(ResolverError::MissingGhArgument("api".to_string())),
         ("api", path) => {
             if let Some(method) = gh_api_method(args) {
@@ -656,6 +663,55 @@ mod argv_tests {
     fn classify_gh_release_create() {
         let op = classify_gh(&s(&["release", "create", "v1"])).unwrap();
         assert_eq!(op, Operation::ReleaseCreate);
+    }
+
+    #[test]
+    fn classify_gh_release_delete() {
+        let op = classify_gh(&s(&["release", "delete", "v1", "--yes"])).unwrap();
+        assert_eq!(op, Operation::ReleaseDelete);
+    }
+
+    #[test]
+    fn classify_gh_release_edit() {
+        let op = classify_gh(&s(&["release", "edit", "v1", "--title", "v1.0.0"])).unwrap();
+        assert_eq!(op, Operation::ReleaseEdit);
+    }
+
+    #[test]
+    fn classify_gh_release_upload() {
+        let op = classify_gh(&s(&["release", "upload", "v1", "/tmp/asset.tar.gz"])).unwrap();
+        assert_eq!(op, Operation::ReleaseUpload);
+    }
+
+    #[test]
+    fn classify_gh_release_delete_asset() {
+        let op = classify_gh(&s(&[
+            "release",
+            "delete-asset",
+            "v1",
+            "asset.tar.gz",
+            "--yes",
+        ]))
+        .unwrap();
+        assert_eq!(op, Operation::ReleaseDeleteAsset);
+    }
+
+    #[test]
+    fn classify_gh_release_list() {
+        let op = classify_gh(&s(&["release", "list", "--limit", "10"])).unwrap();
+        assert_eq!(op, Operation::ReleaseList);
+    }
+
+    #[test]
+    fn classify_gh_release_view() {
+        let op = classify_gh(&s(&["release", "view", "v1"])).unwrap();
+        assert_eq!(op, Operation::ReleaseView);
+    }
+
+    #[test]
+    fn classify_gh_release_download() {
+        let op = classify_gh(&s(&["release", "download", "v1", "--dir", "/tmp"])).unwrap();
+        assert_eq!(op, Operation::ReleaseDownload);
     }
 
     #[test]

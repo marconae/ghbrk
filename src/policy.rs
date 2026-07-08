@@ -28,6 +28,13 @@ pub enum Operation {
     IssueComment,
     IssueClose,
     ReleaseCreate,
+    ReleaseDelete,
+    ReleaseEdit,
+    ReleaseUpload,
+    ReleaseDeleteAsset,
+    ReleaseList,
+    ReleaseView,
+    ReleaseDownload,
     GhApiRead { path: String },
 }
 
@@ -54,6 +61,13 @@ impl Operation {
             Operation::IssueComment => "issue_comment",
             Operation::IssueClose => "issue_close",
             Operation::ReleaseCreate => "release_create",
+            Operation::ReleaseDelete => "release_delete",
+            Operation::ReleaseEdit => "release_edit",
+            Operation::ReleaseUpload => "release_upload",
+            Operation::ReleaseDeleteAsset => "release_delete_asset",
+            Operation::ReleaseList => "release_list",
+            Operation::ReleaseView => "release_view",
+            Operation::ReleaseDownload => "release_download",
             Operation::GhApiRead { .. } => "gh_api_read",
         }
     }
@@ -79,6 +93,13 @@ impl Operation {
             "issue_comment" => Operation::IssueComment,
             "issue_close" => Operation::IssueClose,
             "release_create" => Operation::ReleaseCreate,
+            "release_delete" => Operation::ReleaseDelete,
+            "release_edit" => Operation::ReleaseEdit,
+            "release_upload" => Operation::ReleaseUpload,
+            "release_delete_asset" => Operation::ReleaseDeleteAsset,
+            "release_list" => Operation::ReleaseList,
+            "release_view" => Operation::ReleaseView,
+            "release_download" => Operation::ReleaseDownload,
             "gh_api_read" => Operation::GhApiRead {
                 path: String::new(),
             },
@@ -172,6 +193,9 @@ fn builtin_roles() -> &'static HashMap<&'static str, Vec<Operation>> {
             Operation::GhApiRead {
                 path: String::new(),
             },
+            Operation::ReleaseList,
+            Operation::ReleaseView,
+            Operation::ReleaseDownload,
         ];
         let mut write = read_only.clone();
         write.extend([
@@ -184,12 +208,20 @@ fn builtin_roles() -> &'static HashMap<&'static str, Vec<Operation>> {
             Operation::IssueComment,
             Operation::IssueClose,
         ]);
-        let mut admin = write.clone();
-        admin.push(Operation::ReleaseCreate);
+        let mut maintain = write.clone();
+        maintain.extend([
+            Operation::ReleaseCreate,
+            Operation::ReleaseDelete,
+            Operation::ReleaseEdit,
+            Operation::ReleaseUpload,
+            Operation::ReleaseDeleteAsset,
+        ]);
+        let admin = maintain.clone();
 
         let mut roles = HashMap::new();
         roles.insert("read-only", read_only);
         roles.insert("write", write);
+        roles.insert("maintain", maintain);
         roles.insert("admin", admin);
         roles
     })
@@ -757,6 +789,99 @@ rules:
     }
 
     #[test]
+    fn policy_loads_release_lifecycle_ops() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [release_delete, release_edit, release_upload, release_delete_asset, release_list, release_view, release_download]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.rules[0].operations,
+            OperationsSpec::List(vec![
+                Operation::ReleaseDelete,
+                Operation::ReleaseEdit,
+                Operation::ReleaseUpload,
+                Operation::ReleaseDeleteAsset,
+                Operation::ReleaseList,
+                Operation::ReleaseView,
+                Operation::ReleaseDownload,
+            ])
+        );
+    }
+
+    #[test]
+    fn release_lifecycle_op_rule_does_not_match_other_release_ops() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: [release_delete]
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseDelete, None)),
+            Decision::Allow
+        );
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseEdit, None)),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseUpload, None)),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.evaluate(&req(
+                "alice",
+                "acme",
+                "web",
+                Operation::ReleaseDeleteAsset,
+                None
+            )),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseList, None)),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseView, None)),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.evaluate(&req(
+                "alice",
+                "acme",
+                "web",
+                Operation::ReleaseDownload,
+                None
+            )),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn release_lifecycle_ops_have_no_branch() {
+        assert!(!Operation::ReleaseDelete.has_branch());
+        assert!(!Operation::ReleaseEdit.has_branch());
+        assert!(!Operation::ReleaseUpload.has_branch());
+        assert!(!Operation::ReleaseDeleteAsset.has_branch());
+        assert!(!Operation::ReleaseList.has_branch());
+        assert!(!Operation::ReleaseView.has_branch());
+        assert!(!Operation::ReleaseDownload.has_branch());
+    }
+
+    #[test]
     fn policy_with_pull_loads() {
         let policy = Policy::from_yaml(
             r#"
@@ -828,6 +953,111 @@ rules:
             policy.evaluate(&req("alice", "acme", "web", Operation::Fetch, None)),
             Decision::Allow
         );
+        // read-only now also covers the release read operations.
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseList, None)),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate(&req(
+                "alice",
+                "acme",
+                "web",
+                Operation::ReleaseDownload,
+                None
+            )),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn maintain_role_grants_release_delete() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: maintain
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseDelete, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn maintain_role_grants_release_create() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: maintain
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseCreate, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn write_role_denies_release_delete() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: write
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseDelete, None)),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_role_grants_release_view() {
+        let policy = Policy::from_yaml(
+            r#"
+rules:
+  - user: alice
+    org: acme
+    repo: web
+    operations: read-only
+    effect: allow
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate(&req("alice", "acme", "web", Operation::ReleaseView, None)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn admin_role_superset_of_maintain() {
+        let admin = builtin_roles().get("admin").expect("admin role registered");
+        let maintain = builtin_roles()
+            .get("maintain")
+            .expect("maintain role registered");
+        for op in maintain {
+            assert!(
+                admin.iter().any(|granted| granted.same_kind(op)),
+                "admin must grant everything maintain grants, missing {op:?}"
+            );
+        }
     }
 
     #[test]

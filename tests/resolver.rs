@@ -124,6 +124,21 @@ fn resolve_gh_issue_close() {
 }
 
 #[test]
+fn resolve_gh_release_delete() {
+    let dir = make_repo("https://github.com/acme/web.git", "main");
+    let resolved = resolve_gh(
+        &args(&["release", "delete", "v1.0.0", "--yes"]),
+        dir.path(),
+        None,
+        None,
+    )
+    .expect("resolve");
+    assert_eq!(resolved.operation, Operation::ReleaseDelete);
+    assert_eq!(resolved.org, "acme");
+    assert_eq!(resolved.repo, "web");
+}
+
+#[test]
 fn reject_non_github_url() {
     let dir = make_repo("git@gitlab.com:acme/web.git", "main");
     let err = resolve_git(&args(&["push", "origin", "main"]), dir.path(), None, None)

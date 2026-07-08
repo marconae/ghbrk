@@ -15,14 +15,19 @@
 #   push, fetch, pull, clone
 #   pr_open, pr_comment, pr_close, pr_merge, pr_review
 #   issue_open, issue_comment, issue_close
-#   release_create
+#   release_create, release_delete, release_edit, release_upload,
+#   release_delete_asset, release_list, release_view, release_download
 #   gh_api_read  (GET-only GitHub REST API calls via `gh api`)
 #
 # Built-in roles (always available, can be overridden in the roles: section):
-#   read-only  - fetch, clone, pull, pr_review, gh_api_read
+#   read-only  - fetch, clone, pull, pr_review, gh_api_read, release_list,
+#                release_view, release_download
 #   write      - read-only + push, pr_open, pr_comment, pr_close, pr_merge,
 #                issue_open, issue_comment, issue_close
-#   admin      - write + release_create
+#   maintain   - write + release_create, release_delete, release_edit,
+#                release_upload, release_delete_asset
+#   admin      - maintain (structurally identical for now; reserved for
+#                future admin-only operations)
 #
 # User-defined roles (declared in the optional roles: section below) shadow
 # built-in roles of the same name. A role name used in operations: is resolved

@@ -235,15 +235,7 @@ async fn daemon_resolves_uid_via_peercred() {
     // side by establishing a loopback pair via a second listener.
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
 
-    let expected_user = std::process::Command::new("id")
-        .arg("-un")
-        .output()
-        .expect("id -un")
-        .stdout;
-    let expected_user = std::str::from_utf8(&expected_user)
-        .unwrap()
-        .trim()
-        .to_string();
+    let expected_user = current_test_user();
 
     // peer_username called on the server end resolves the client's UID.
     let resolved = ghbrk::broker::peer_username(&server);
@@ -592,4 +584,153 @@ async fn broker_denies_local_git_subcommand() {
         log.contains("\"decision\":\"deny\"") && log.contains("status"),
         "expected a deny entry mentioning the subcommand, got:\n{log}"
     );
+}
+
+/// `gh release <verb>` must be policy-gated, not executed via ungoverned
+/// passthrough. A user with no rule granting any release operation is denied,
+/// and the audit log names the resolved operation (`release_delete`) rather
+/// than `passthrough` — proving the request went through resolve + policy.
+#[tokio::test]
+async fn broker_denies_release_delete_by_default() {
+    let h = Harness::start().await; // dummy_policy(): empty rules, default-deny.
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Gh,
+        args: vec![
+            "release".into(),
+            "delete".into(),
+            "v1.0.0".into(),
+            "--repo".into(),
+            "acme/web".into(),
+            "--yes".into(),
+        ],
+        cwd: PathBuf::from("/"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let frame: ServerFrame = read_frame(&mut stream).await.unwrap();
+    assert!(
+        matches!(frame, ServerFrame::Denied { .. }),
+        "expected Denied for release_delete with no granting rule, got {frame:?}"
+    );
+
+    h.handle.abort();
+    let _ = h.handle.await;
+    let log = std::fs::read_to_string(&h.audit_path).expect("audit log readable");
+    assert!(
+        log.contains("\"decision\":\"deny\"") && log.contains("release_delete"),
+        "expected a deny entry naming release_delete (not passthrough), got:\n{log}"
+    );
+}
+
+fn current_test_user() -> String {
+    let out = std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .expect("id -un");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn write_mode(path: &std::path::Path, contents: &str, mode: u32) {
+    std::fs::write(path, contents).unwrap();
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_mode(mode);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+/// Restores the process-wide `PATH` env var on drop.
+///
+/// Neither `ChildSpec` (`src/executor.rs`) nor `BrokerConfig` (`src/broker.rs`)
+/// expose a way to inject an environment override scoped to just the
+/// broker-under-test's spawned children — `stream_child` only falls back to
+/// `std::env::var("PATH")` when the child's own env has no `PATH` entry, and
+/// nothing plumbs a test-supplied `PATH` into that per-request env. Until such
+/// a seam exists, `install_stub_gh` must mutate the process-wide `PATH`, so
+/// this guard restores the prior value on drop (including on panic) to keep
+/// the mutation from leaking into other tests running concurrently in this
+/// binary.
+struct PathGuard {
+    original: Option<String>,
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
+/// Place a stub `gh` on PATH that prints its `GH_TOKEN` to stdout, so an
+/// allowed release operation can be proven to reach real execution without
+/// depending on the real `gh` binary or network access.
+///
+/// Returns a guard that restores the original `PATH` when dropped; keep it
+/// alive for the duration of the test.
+#[must_use]
+fn install_stub_gh(dir: &std::path::Path) -> PathGuard {
+    let script = dir.join("gh");
+    write_mode(
+        &script,
+        "#!/bin/sh\nprintf 'argv=%s GH_TOKEN=%s' \"$*\" \"$GH_TOKEN\"\n",
+        0o755,
+    );
+    let original = std::env::var("PATH").ok();
+    let prev = original.clone().unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{}", dir.display(), prev));
+    PathGuard { original }
+}
+
+/// A user granted the `maintain` role can perform a mutating release
+/// operation: the request clears policy and reaches real execution (a stub
+/// `gh` receives the injected `GH_TOKEN`), proving `maintain` carries
+/// `release_delete` end-to-end over the broker socket.
+#[tokio::test]
+async fn broker_allows_release_delete_under_maintain() {
+    let user = current_test_user();
+
+    let creds_root = tempfile::tempdir().unwrap();
+    let user_dir = creds_root.path().join(&user);
+    std::fs::create_dir_all(&user_dir).unwrap();
+    write_mode(&user_dir.join("id_rsa"), "dummy-key", 0o600);
+    write_mode(&user_dir.join("token"), "ghp_maintain_test_token", 0o600);
+
+    let bin_dir = tempfile::tempdir().unwrap();
+    let _path_guard = install_stub_gh(bin_dir.path());
+
+    let policy = Policy::from_yaml(&format!(
+        "rules:\n  - user: \"{user}\"\n    org: acme\n    repo: web\n    operations: maintain\n    effect: allow\n"
+    ))
+    .unwrap();
+    let h = Harness::start_with(policy, Some(creds_root.path().to_path_buf())).await;
+
+    let mut stream = UnixStream::connect(&h.socket_path).await.unwrap();
+    let req = Request {
+        tool: Tool::Gh,
+        args: vec![
+            "release".into(),
+            "delete".into(),
+            "v1.0.0".into(),
+            "--repo".into(),
+            "acme/web".into(),
+            "--yes".into(),
+        ],
+        cwd: PathBuf::from("/"),
+        remote_url: None,
+        head_branch: None,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let (out, code) = collect_until_exit(&mut stream).await;
+    assert_eq!(
+        code, 0,
+        "expected clean exit for maintain-granted release_delete, got output:\n{out}"
+    );
+    assert!(
+        out.contains("GH_TOKEN=ghp_maintain_test_token"),
+        "expected stub gh to receive the injected token, got:\n{out}"
+    );
+
+    h.handle.abort();
 }
