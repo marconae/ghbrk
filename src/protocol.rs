@@ -26,18 +26,20 @@ pub struct Request {
     pub tool: Tool,
     pub args: Vec<String>,
     pub cwd: PathBuf,
-    /// Raw remote URL hint resolved by the shim (e.g. `git@github.com:org/repo.git`).
+    /// Raw remote URL hint resolved by the shim (for example, `git@github.com:org/repo.git`).
     #[serde(default)]
     pub remote_url: Option<String>,
-    /// Head branch name hint resolved by the shim (e.g. `main`).
+    /// Head branch name hint resolved by the shim (for example, `main`).
     #[serde(default)]
     pub head_branch: Option<String>,
     /// Whether one or more `ClientFrame`s follow this request on the same
     /// connection, carrying the caller's own standard input to the spawned
-    /// child. Defaults to `false`, which is how every request from a client
-    /// released before stdin forwarding existed decodes: the broker then
-    /// closes the child's standard input at spawn time instead of waiting
-    /// for a frame that will never arrive.
+    /// child.
+    ///
+    /// Defaults to `false`. A client built before stdin forwarding existed
+    /// sends no such frames, so its request always decodes with this field
+    /// false. The broker then closes the child's standard input at spawn
+    /// time instead of waiting for a frame that will never arrive.
     #[serde(default)]
     pub client_frames: bool,
     /// Device and inode of the caller's own `/tmp`, sent only by the `check`
@@ -77,7 +79,7 @@ pub enum ClientFrame {
 /// can still deserialize the frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathAudit {
-    /// Human-readable label for the path (e.g. `Credential dir`, `SSH key`).
+    /// Human-readable label for the path (for example, `Credential dir`, `SSH key`).
     pub label: String,
     /// Absolute path the broker stat'd.
     pub path: PathBuf,
@@ -148,8 +150,8 @@ where
 /// Read one length-prefixed JSON frame from `reader` and deserialize it as `T`.
 ///
 /// Rejects frames whose declared length exceeds [`MAX_FRAME_LEN`] without
-/// attempting to allocate or read the body. Returns `Truncated` if EOF arrives
-/// before the body has been fully read.
+/// allocating or reading the body. Returns `Truncated` when EOF arrives
+/// before it reads the whole body.
 pub async fn read_frame<R, T>(reader: &mut R) -> Result<T, ProtocolError>
 where
     R: AsyncRead + Unpin,

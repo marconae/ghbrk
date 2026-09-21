@@ -870,6 +870,15 @@ fn wait_for_mock_github(timeout: Duration) {
     panic!("mock-github did not become reachable within {timeout:?}");
 }
 
+/// Waits for `devenv`, then for `mock-github` behind it. Use this instead of
+/// calling `wait_for_devenv` alone in any test that talks to `mock-github` —
+/// a bare `wait_for_devenv` silently reintroduces the startup race that
+/// `wait_for_mock_github` exists to close.
+fn wait_for_devenv_and_mock_github() {
+    wait_for_devenv(Duration::from_secs(120));
+    wait_for_mock_github(Duration::from_secs(30));
+}
+
 /// Builds the static musl `ghbrk` binary and returns its path. The container's
 /// glibc is older than the test host's, so the dynamically linked
 /// `CARGO_BIN_EXE_ghbrk` would fail to load inside `devenv`; a static musl
@@ -1106,8 +1115,7 @@ fn mock_github_reachable_over_tls() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(120));
-    wait_for_mock_github(Duration::from_secs(30));
+    wait_for_devenv_and_mock_github();
 
     // Curl over TLS *without* -k: success proves the test CA is trusted and the
     // server certificate's SAN matches `mock-github`.
@@ -1144,8 +1152,7 @@ fn gh_api_through_broker_succeeds() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(120));
-    wait_for_mock_github(Duration::from_secs(30));
+    wait_for_devenv_and_mock_github();
 
     provision_devenv(true, gh_api_allow_policy());
     start_daemon_in_devenv();
@@ -1173,8 +1180,7 @@ fn gh_api_broker_missing_token() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(120));
-    wait_for_mock_github(Duration::from_secs(30));
+    wait_for_devenv_and_mock_github();
 
     provision_devenv(false, gh_api_allow_policy());
     start_daemon_in_devenv();
@@ -1290,8 +1296,7 @@ fn gh_pr_comment_body_file_dash_forwards_stdin_body() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(120));
-    wait_for_mock_github(Duration::from_secs(30));
+    wait_for_devenv_and_mock_github();
 
     provision_devenv(true, gh_pr_allow_policy());
     start_daemon_in_devenv();
@@ -1330,8 +1335,7 @@ fn gh_pr_comment_body_file_path_forwards_body() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(120));
-    wait_for_mock_github(Duration::from_secs(30));
+    wait_for_devenv_and_mock_github();
 
     provision_devenv(true, gh_pr_allow_policy());
     write_file_in_container(
@@ -1376,8 +1380,7 @@ fn gh_pr_create_body_file_dash_forwards_stdin_body() {
     }
     let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _compose = start_compose();
-    wait_for_devenv(Duration::from_secs(120));
-    wait_for_mock_github(Duration::from_secs(30));
+    wait_for_devenv_and_mock_github();
 
     provision_devenv(true, gh_pr_allow_policy());
     seed_pr_create_repo_in_devenv();

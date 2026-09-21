@@ -45,8 +45,8 @@ impl AuditRecord {
     }
 }
 
-/// Append-only writer for `AuditRecord`s. Internally serialises writes via a
-/// `std::sync::Mutex` so multiple Tokio tasks can call `write` concurrently.
+/// Append-only writer for `AuditRecord`s. A `std::sync::Mutex` serializes
+/// writes, so multiple Tokio tasks can call `write` concurrently.
 pub struct AuditLogger {
     path: PathBuf,
     inner: Mutex<BufWriter<File>>,
@@ -71,7 +71,7 @@ impl AuditLogger {
         &self.path
     }
 
-    /// Serialises `record` as one JSON line and appends it to the log.
+    /// Serializes `record` as one JSON line and appends it to the log.
     pub fn write(&self, record: &AuditRecord) -> Result<(), io::Error> {
         let mut line = serde_json::to_vec(record)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -226,17 +226,17 @@ mod tests {
         {
             let logger = AuditLogger::new(&path).unwrap();
             logger.write(&sample_record(AuditDecision::Allow)).unwrap();
-            // Intentionally no explicit flush; drop must persist.
+            // This test omits an explicit flush on purpose. Drop must persist the record.
         }
         let body = fs::read_to_string(&path).unwrap();
         assert!(!body.is_empty());
         assert_eq!(body.lines().count(), 1);
     }
 
-    /// 10.5: if credentials are loaded from disk and then a record is written
-    /// from the broker decision path, the token must never appear in the log
-    /// file. The audit record carries no token field; the broker is expected
-    /// not to splice tokens into reasons.
+    /// Regression test for issue 10.5. When the broker loads credentials from
+    /// disk and writes a record on its decision path, the token must never
+    /// appear in the log file. The audit record has no token field, and the
+    /// broker must not splice a token into a reason string.
     #[test]
     fn token_never_appears_in_audit_file() {
         let dir = TempDir::new().unwrap();
@@ -261,10 +261,10 @@ mod tests {
         let creds = crate::credentials::load_credentials_from(&cred_dir, "alice").unwrap();
         assert_eq!(creds.token, token_value);
 
-        // Now exercise the broker decision-path equivalent: build records and
-        // write them. The deny reason and other fields originate from the
-        // policy engine, NOT from credentials. We simulate both an allow and a
-        // deny.
+        // This block exercises the broker's decision path: it builds records
+        // and writes them. The deny reason and other fields come from the
+        // policy engine, not from credentials. The test simulates an allow
+        // and a deny.
         let log_path = dir.path().join("audit.log");
         let logger = AuditLogger::new(&log_path).unwrap();
         logger

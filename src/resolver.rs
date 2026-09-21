@@ -174,14 +174,15 @@ fn parse_head_branch(text: &str) -> Option<String> {
     target.strip_prefix("refs/heads/").map(|s| s.to_string())
 }
 
-/// A git repository discovered from a working directory, as git itself sees it.
+/// A git repository discovered from a working directory, the way git itself sees it.
 ///
-/// Holds the two directories git distinguishes. The common dir owns `config`
-/// and therefore the remote, shared by every worktree of the repository. The
-/// private dir owns `HEAD` and therefore the branch, which differs per
-/// worktree. A plain checkout has one directory in both roles; a linked
-/// worktree splits them, which is why no caller is ever handed a single
-/// "the git dir" to read both from.
+/// This struct holds the two directories that git distinguishes. The common
+/// directory owns `config`, so it owns the remote. Every worktree of the
+/// repository shares this directory. The private directory owns `HEAD`, so it
+/// owns the branch. Each worktree has its own private directory. A plain
+/// checkout uses one directory for both roles. A linked worktree splits them
+/// into two. This is why no caller receives one single "git directory" that
+/// has both files.
 #[derive(Debug)]
 pub struct LocalRepo {
     private_dir: PathBuf,
@@ -189,10 +190,12 @@ pub struct LocalRepo {
 }
 
 impl LocalRepo {
-    /// Discover the repository containing `start` by walking upward, the way
-    /// git does. The walk stops at the first `.git` entry, usable or not: an
-    /// unusable one reports no repository rather than falling through and
-    /// binding the request to an enclosing repository.
+    /// Discovers the repository that contains `start`, walking upward the way
+    /// git does.
+    ///
+    /// The walk stops at the first `.git` entry, whether it is usable or not.
+    /// An unusable entry reports no repository. The function does not fall
+    /// through to bind the request to an enclosing repository.
     pub fn discover(start: &Path) -> Option<LocalRepo> {
         let mut current = Some(start);
         while let Some(work_dir) = current {
@@ -205,16 +208,17 @@ impl LocalRepo {
         None
     }
 
-    /// Read `remote.origin.url`, or the first remote's URL when there is no
-    /// origin, from the config every worktree of this repository shares.
+    /// Reads `remote.origin.url` from the config shared by every worktree of
+    /// this repository. If no origin exists, the function reads the first
+    /// remote's URL instead.
     pub fn origin_url(&self) -> Result<String, ResolverError> {
         let text = fs::read_to_string(self.common_dir.join("config"))?;
         parse_remote_url(&text).ok_or(ResolverError::NoRemoteConfigured)
     }
 
-    /// Read the branch checked out in this working directory from its own
-    /// `HEAD`, which a linked worktree does not share with the main checkout.
-    /// `None` when HEAD is detached or unreadable.
+    /// Reads the branch checked out in this working directory, from its own
+    /// `HEAD` file. A linked worktree does not share `HEAD` with the main
+    /// checkout. Returns `None` when `HEAD` is detached or unreadable.
     pub fn head_branch(&self) -> Option<String> {
         let head = fs::read_to_string(self.private_dir.join("HEAD")).ok()?;
         parse_head_branch(&head)
@@ -242,9 +246,9 @@ impl LocalRepo {
     }
 }
 
-/// The private git directory a `.git` file's `gitdir:` line names. A relative
-/// pointer is taken from `work_dir`, the directory holding the `.git` file;
-/// an absolute one stands on its own.
+/// The private git directory named by a `.git` file's `gitdir:` line. A
+/// relative pointer is resolved against `work_dir`, the directory that holds
+/// the `.git` file. An absolute pointer stands on its own.
 fn private_dir_from_pointer(work_dir: &Path, git_file_content: &str) -> Option<PathBuf> {
     let line = git_file_content.lines().next()?.trim_start();
     let target = line.strip_prefix("gitdir:")?.trim();
@@ -254,9 +258,10 @@ fn private_dir_from_pointer(work_dir: &Path, git_file_content: &str) -> Option<P
     Some(work_dir.join(target))
 }
 
-/// The common git directory a worktree's `commondir` file names. A relative
-/// value is taken from the private dir; an absent file, as a submodule has,
-/// makes the private dir its own common dir.
+/// The common git directory named by a worktree's `commondir` file. A
+/// relative value is resolved against the private directory. When the file
+/// is absent, as in a submodule, the private directory becomes its own
+/// common directory.
 fn common_dir_from_pointer(private_dir: &Path, commondir: Option<&str>) -> PathBuf {
     match commondir.map(str::trim).filter(|target| !target.is_empty()) {
         Some(target) => private_dir.join(target),
@@ -264,15 +269,16 @@ fn common_dir_from_pointer(private_dir: &Path, commondir: Option<&str>) -> PathB
     }
 }
 
-/// Remote URL and HEAD branch of the repository containing `cwd`, read in the
-/// invoking user's process before the request crosses the privilege boundary.
+/// Remote URL and HEAD branch of the repository that contains `cwd`. The
+/// invoking user's process reads both, before the request crosses the
+/// privilege boundary.
 ///
-/// Shared by the three client-side hint passes (`ghbrk git`, `ghbrk gh`, and
-/// `ghbrk explain`) so all three agree with each other, and with the
-/// broker-side fallback, on which repository and worktree answered the
-/// question. Either element is `None` when no repository is found or the
-/// corresponding file is unreadable; neither absence is an error, since the
-/// broker falls back to its own discovery when no hint is supplied.
+/// The three client-side hint passes (`ghbrk git`, `ghbrk gh`, and `ghbrk
+/// explain`) share this function. This keeps all three, and the broker-side
+/// fallback, in agreement on which repository and worktree answered the
+/// question. Each element is `None` when no repository exists, or when the
+/// matching file is unreadable. Neither absence is an error. The broker
+/// falls back to its own discovery when no hint is supplied.
 pub fn repo_hints(cwd: &Path) -> (Option<String>, Option<String>) {
     match LocalRepo::discover(cwd) {
         Some(repo) => (repo.origin_url().ok(), repo.head_branch()),
@@ -298,15 +304,15 @@ pub fn resolve_git(
     }
 }
 
-/// Resolve the GitHub remote from a URL hint or by discovering the repository
-/// containing `cwd`.
+/// Resolves the GitHub remote from a URL hint, or by discovering the
+/// repository that contains `cwd`.
 ///
 /// Returns `(remote, local_repo)`. `local_repo` is `Some` only when discovery
-/// actually ran, so a caller that also needs the branch can reuse the very
-/// repository the remote came from instead of walking a second time and
-/// risking a different binding. A URL hint answers the remote question
-/// outright and therefore suppresses discovery here; it says nothing about the
-/// branch, which a caller that needs one still has to look up for itself.
+/// actually ran. A caller that also needs the branch can then reuse this same
+/// repository, instead of walking the directory tree a second time and
+/// risking a different result. A URL hint answers the remote question
+/// directly, so it suppresses discovery here. The hint says nothing about the
+/// branch. A caller that needs the branch must still look it up.
 fn resolve_remote_url(
     hint: Option<&str>,
     cwd: &Path,
@@ -424,11 +430,13 @@ fn positional_after_subcommand(args: &[String], subcmd: &str) -> Vec<String> {
     out
 }
 
-/// The first non-flag positional argument in a git invocation, skipping any
-/// global flag that consumes the next argv token as its value. This is the
-/// single owner of git's value-taking global-flag list; the shim (`ghbrk
-/// git`) shares it to decide whether an invocation is a remote operation, so
-/// both agree on which token is the subcommand.
+/// The first non-flag positional argument in a git invocation. The function
+/// skips any global flag that consumes the next argv token as its value.
+///
+/// This function owns the single list of value-taking global flags for git.
+/// The shim (`ghbrk git`) calls this same function to decide whether an
+/// invocation is a remote operation. Both then agree on which token is the
+/// subcommand.
 pub fn first_non_flag(args: &[String]) -> Option<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -538,13 +546,15 @@ fn classify_gh(args: &[String]) -> Result<Operation, ResolverError> {
     Ok(op)
 }
 
-/// Value-taking flags of `gh api`. Table entries are matched by exact
-/// equality with the whole token, never as a prefix, so an attached short
-/// value (`-XPOST`) or an `=`-joined value (`--jq=.name`) carries its own
-/// value and is not treated as an occurrence of the flag — it consumes no
-/// following token. Boolean flags (`--paginate`, `--slurp`, `--silent`,
-/// `--verbose`, `-i`/`--include`) are deliberately absent: listing one here
-/// would make the resolver swallow the API path that follows it.
+/// Value-taking flags of `gh api`. The table matches each entry by exact
+/// equality with the whole token, never as a prefix. An attached short value
+/// (`-XPOST`) or an `=`-joined value (`--jq=.name`) carries its own value.
+/// The resolver does not treat these as an occurrence of the flag, so they
+/// consume no following token.
+///
+/// Boolean flags (`--paginate`, `--slurp`, `--silent`, `--verbose`,
+/// `-i`/`--include`) are deliberately absent from this table. Listing one
+/// here would make the resolver swallow the API path that follows it.
 const GH_API_VALUE_FLAGS: &[&str] = &[
     "-X",
     "--method",
@@ -565,14 +575,16 @@ const GH_API_VALUE_FLAGS: &[&str] = &[
 
 /// Collects the positional (non-flag) arguments of a `gh` invocation.
 ///
-/// The `gh api` arity table (skipping the value that follows a value-taking
-/// flag such as `-X`/`--method`) applies only when the invocation's first
-/// non-flag token is `api`. Every other invocation (`gh pr`, `gh issue`,
-/// `gh release`, …) keeps the pre-existing no-arity rule — the same short
-/// flag spellings mean different things there, e.g. `-f` is the boolean
-/// `--fill` of `gh pr create`, not the value-taking `--raw-field` of `gh
-/// api` — so applying the table everywhere would change positional
-/// extraction for those invocations as a side effect of fixing `gh api`.
+/// The `gh api` arity table applies only when the invocation's first non-flag
+/// token is `api`. This table skips the value that follows a value-taking
+/// flag, such as `-X` or `--method`.
+///
+/// Every other invocation (`gh pr`, `gh issue`, `gh release`, and more) keeps
+/// the pre-existing no-arity rule. The same short flag spellings mean
+/// different things there. For example, `-f` is the boolean `--fill` flag of
+/// `gh pr create`, not the value-taking `--raw-field` flag of `gh api`.
+/// Applying the table everywhere would change positional extraction for
+/// those invocations, as a side effect of fixing `gh api`.
 fn gh_positional_args(args: &[String]) -> Vec<&String> {
     let is_api = args
         .iter()
@@ -601,10 +613,11 @@ fn gh_api_positional_args(args: &[String]) -> Vec<&String> {
     out
 }
 
-/// Extracts the HTTP method requested for a `gh api` call, if any `-X`/
-/// `--method` flag is present. Recognizes spaced (`-X POST`), compact
-/// (`-XPOST`), and `=`-joined (`--method=POST`) forms. Returns `None` when no
-/// method flag is present (gh defaults to GET).
+/// Extracts the HTTP method requested for a `gh api` call, if a `-X` or
+/// `--method` flag is present. Recognizes the spaced form (`-X POST`), the
+/// compact form (`-XPOST`), and the `=`-joined form (`--method=POST`).
+/// Returns `None` when no method flag is present. `gh` defaults to GET in
+/// that case.
 fn gh_api_method(args: &[String]) -> Option<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -782,9 +795,9 @@ mod discovery_tests {
         );
     }
 
-    /// A submodule's pointer is relative and reaches upward. The `..`
-    /// components stay in the path: the kernel resolves them after symlinks,
-    /// which textual normalisation would not.
+    /// A submodule's pointer is relative, and reaches upward. The path keeps
+    /// the `..` components. The kernel resolves them after symlinks. Textual
+    /// normalization cannot do this correctly.
     #[test]
     fn relative_gitdir_pointer_joins_the_dir_holding_the_git_file() {
         assert_eq!(
@@ -819,7 +832,7 @@ mod discovery_tests {
         );
     }
 
-    /// Real git writes the `.git` file with a trailing newline; an untrimmed
+    /// Real git writes the `.git` file with a trailing newline. An untrimmed
     /// value names a directory that does not exist.
     #[test]
     fn trailing_newline_is_trimmed_from_the_gitdir_pointer() {
@@ -853,8 +866,8 @@ mod discovery_tests {
         );
     }
 
-    /// Real git writes `commondir` with a trailing newline; untrimmed, the
-    /// usual `../..` names a directory that does not exist.
+    /// Real git writes `commondir` with a trailing newline. An untrimmed
+    /// value, such as `../..`, names a directory that does not exist.
     #[test]
     fn trailing_newline_is_trimmed_from_the_commondir_value() {
         assert_eq!(
@@ -863,8 +876,8 @@ mod discovery_tests {
         );
     }
 
-    /// A submodule has no `commondir`: its private directory holds `config`
-    /// itself and is therefore its own common directory.
+    /// A submodule has no `commondir`. Its private directory holds `config`
+    /// itself, so it is its own common directory.
     #[test]
     fn absent_commondir_leaves_the_private_dir_as_the_common_dir() {
         assert_eq!(
@@ -1082,9 +1095,9 @@ mod argv_tests {
     #[test]
     fn classify_gh_api_attached_short_value_consumes_no_following_token() {
         let op = classify_gh(&s(&["api", "-XPOST", "repos/acme/web"])).unwrap_err();
-        // -XPOST is a non-GET method, so classification is rejected — but only
-        // after correctly resolving "repos/acme/web" as the path rather than
-        // treating it as a second value consumed by -XPOST.
+        // -XPOST is a non-GET method, so classification is rejected. But the
+        // resolver must first correctly resolve "repos/acme/web" as the path.
+        // It must not treat this path as a second value consumed by -XPOST.
         assert!(matches!(op, ResolverError::UnknownGhCommand(ref msg) if msg.contains("POST")));
     }
 
@@ -1215,8 +1228,8 @@ mod argv_tests {
 
     #[test]
     fn branch_from_refspec_head_to_head_falls_back() {
-        // Both sides HEAD with no repository in hand: the local-side fallback
-        // returns the literal "HEAD".
+        // Both sides are HEAD, and no repository is available. The
+        // local-side fallback returns the literal "HEAD".
         assert_eq!(branch_from_refspec("HEAD:HEAD", None), "HEAD");
     }
 
@@ -1304,7 +1317,7 @@ mod hint_tests {
     }
 
     /// An explicit push refspec must win over the HEAD branch hint. The shim
-    /// always sets `branch_hint` to the current HEAD, but `git push origin
+    /// always sets `branch_hint` to the current HEAD. But `git push origin
     /// feature/x` targets `feature/x`, not HEAD. Policy keys off the resolved
     /// branch, so the refspec must take precedence.
     #[test]
@@ -1320,8 +1333,8 @@ mod hint_tests {
         assert_eq!(resolved.branch.as_deref(), Some("feature/x"));
     }
 
-    /// With no explicit refspec, the HEAD branch hint is used (bypassing the
-    /// broker-side file read of an unreadable git dir).
+    /// With no explicit refspec, the function uses the HEAD branch hint. This
+    /// bypasses the broker-side file read of an unreadable git directory.
     #[test]
     fn resolve_git_push_uses_hint_when_no_refspec() {
         let tmp = tempfile::tempdir().expect("tempdir");

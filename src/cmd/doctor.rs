@@ -46,9 +46,9 @@ pub fn run() -> ExitCode {
     let (daemon_ok, checks) = runtime.block_on(check_daemon_and_creds(&socket_path, caller_tmp));
     let policy_verdict = check_policy(&policy_path);
 
-    // Collect a verdict from every check before deciding the exit code. Each
-    // check above already printed its own status line, so no check is
-    // short-circuited by an earlier failure.
+    // Collect a verdict from every check before it decides the exit code.
+    // Each check above already printed its own status line. No check stops
+    // early because of an earlier failure.
     let mut verdicts = vec![
         verdict_from_success(daemon_ok, "daemon unreachable"),
         verdict_from_success(checks.credentials_ok, "credential check failed"),
@@ -73,9 +73,9 @@ fn verdict_from_success(success: bool, failure_detail: &str) -> PermissionVerdic
     }
 }
 
-/// Fold every check's verdict into a single exit code: the command fails iff at
-/// least one `Error` was emitted. `Warning` verdicts never change the exit
-/// status, and an empty set is success.
+/// Fold every check's verdict into one exit code. The command fails when at
+/// least one verdict is `Error`. A `Warning` verdict never changes the exit
+/// status, and an empty set of verdicts is a success.
 fn aggregate_exit(verdicts: &[PermissionVerdict]) -> ExitCode {
     let has_error = verdicts
         .iter()
@@ -93,9 +93,9 @@ fn policy_path_from_env() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_POLICY_PATH))
 }
 
-/// The config directory is the directory holding the policy file, so it tracks
-/// the `GHBRK_POLICY` override seam. Falls back to `/etc/ghbrk` when the policy
-/// path is bare.
+/// The config directory is the directory holding the policy file, so it
+/// tracks the `GHBRK_POLICY` override seam. It falls back to `/etc/ghbrk`
+/// when the policy path is bare.
 fn config_dir_from_policy_path(policy_path: &Path) -> PathBuf {
     match policy_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -104,10 +104,10 @@ fn config_dir_from_policy_path(policy_path: &Path) -> PathBuf {
 }
 
 /// Stats the caller's own `/tmp` for the `cli/doctor` shared-filesystem
-/// check. Creates no file, prints nothing, and leaves the presentation of a
-/// stat failure to the caller: a caller that cannot even stat its own `/tmp`
-/// has nothing to compare, and that absence is not itself a fault the broker
-/// can diagnose.
+/// check. It creates no file and prints nothing. It leaves the report of a
+/// stat failure to the caller: a caller that cannot stat its own `/tmp` has
+/// nothing to compare, and that absence is not a fault the broker can
+/// diagnose.
 fn caller_tmp_identity() -> io::Result<TmpIdentity> {
     use std::os::unix::fs::MetadataExt;
 
@@ -118,12 +118,11 @@ fn caller_tmp_identity() -> io::Result<TmpIdentity> {
     })
 }
 
-/// Outcome of one `check` request, one verdict per subsystem the request
-/// covers. The broker folds every check it ran into a single exit code, so a
-/// failure of any one of them would otherwise be attributed to whichever
-/// subsystem the client happens to name first. Keeping them apart lets each
-/// verdict reach the exit decision on its own and each failure be reported
-/// under its own heading.
+/// Outcome of one `check` request: one verdict per subsystem it covers.
+/// The broker folds every check into one exit code. A single verdict
+/// cannot say which subsystem failed, so this struct keeps one verdict per
+/// subsystem. Each verdict reaches the exit decision on its own, and each
+/// failure is reported under its own heading.
 struct CheckVerdicts {
     credentials_ok: bool,
     shared_filesystem: PermissionVerdict,
@@ -131,11 +130,11 @@ struct CheckVerdicts {
 }
 
 impl CheckVerdicts {
-    /// The verdicts of a check request whose credential result could not be
-    /// established: the daemon was unreachable, the transport failed, or the
-    /// request was denied. The caller has already printed the reason under the
-    /// `Credentials:` heading, and the shared-filesystem check never ran, so it
-    /// contributes nothing to the exit decision.
+    /// The verdicts for a check request whose credential result is unresolved:
+    /// the daemon was unreachable, the transport failed, or the broker denied
+    /// the request. The caller already printed the reason under the
+    /// `Credentials:` heading. The shared-filesystem check never ran, so it
+    /// does not affect the exit decision.
     fn credentials_unresolved(credential_paths: Vec<PermissionVerdict>) -> Self {
         Self {
             credentials_ok: false,
@@ -147,7 +146,7 @@ impl CheckVerdicts {
 
 /// Attempt to connect to the broker socket and run the Check tool.
 ///
-/// Returns `(daemon_ok, verdicts)`; see [`CheckVerdicts`] for why the checks
+/// Returns `(daemon_ok, verdicts)`. See [`CheckVerdicts`] for why the checks
 /// the broker ran are reported per subsystem rather than as one boolean.
 async fn check_daemon_and_creds(
     socket_path: &Path,
@@ -169,10 +168,10 @@ async fn check_daemon_and_creds(
 /// Send a `Tool::Check` request via an already-connected stream, print one
 /// heading per subsystem the broker reported on, and return their verdicts.
 ///
-/// The broker's exit code names no subsystem — it is the conjunction of every
-/// check it ran — so it is not the credentials verdict. That verdict comes
-/// from the credential status lines and the path audit; see
-/// [`credentials_passed`].
+/// The broker's exit code names no subsystem. It is the combined result of
+/// every check the broker ran, so it is not the credentials verdict on its
+/// own. The credentials verdict comes from the credential status lines and
+/// the path audit. See [`credentials_passed`].
 async fn run_check_via_broker(
     stream: UnixStream,
     caller_tmp: Option<TmpIdentity>,
@@ -259,9 +258,9 @@ const STATUS_NOT_RUN: &str = "SKIPPED";
 /// Answers whether one `<label>: <VERDICT> [(detail)]` line of the broker's
 /// check output reports a pass.
 ///
-/// Recognition is positive: only the pass and not-run tokens count, so a
-/// failure token — or any line shape this client does not know, including one
-/// a newer daemon introduces — is never read as a pass.
+/// Recognition is positive: only the pass and not-run tokens count. A
+/// failure token is never read as a pass. Nor is any line shape this client
+/// does not know, including one a newer daemon adds later.
 fn status_line_passes(line: &str) -> bool {
     match line.split_once(": ") {
         Some((_, verdict)) => {
@@ -275,12 +274,12 @@ fn status_line_passes(line: &str) -> bool {
 /// Decides the `Credentials:` verdict for a check request that ran to
 /// completion.
 ///
-/// The broker's exit code is the conjunction of every check it ran, the
-/// shared-filesystem check included, so it cannot name the failing subsystem:
-/// deriving the credentials verdict from it alone reports a mismatched `/tmp`
-/// as a credential failure. A zero exit is still conclusive — the broker
-/// passed everything it ran — and otherwise the credential status lines and
-/// the path audit decide, with an unrecognised line failing closed.
+/// The broker's exit code is the result of every check it ran, the
+/// shared-filesystem check included, so it cannot name the failing
+/// subsystem. Read alone, it marks a mismatched `/tmp` as a credential
+/// failure. A zero exit is still conclusive: the broker passed every check
+/// it ran. Otherwise the credential status lines and the path audit
+/// decide, and an unrecognized line fails closed.
 fn credentials_passed(
     exit_code: i32,
     credential_output: &str,
@@ -308,11 +307,12 @@ fn shared_filesystem_verdict(line: &str) -> PermissionVerdict {
     }
 }
 
-/// Pulls the line starting `Shared filesystem:` out of the broker's collected
-/// check output, if present, so it can be printed unconditionally rather than
-/// only when the overall check failed, and so the credentials verdict is read
-/// off the credential lines alone. Returns the extracted line (without its
-/// trailing newline) and the remaining output with that line removed.
+/// Pulls the line starting `Shared filesystem:` out of the broker's
+/// collected check output, if present. This lets the caller print it
+/// unconditionally, not only when the overall check fails, and lets the
+/// credentials verdict come from the credential lines alone. Returns the
+/// extracted line, without its trailing newline, and the remaining output
+/// with that line removed.
 fn split_out_shared_filesystem_line(output: &str) -> (Option<String>, String) {
     let mut shared_fs_line = None;
     let mut remaining = String::new();
@@ -337,10 +337,10 @@ enum PermissionVerdict {
     Error(String),
 }
 
-/// The kind of filesystem object being audited. The write-path and read-path
-/// exposure rules differ per kind: a directory's execute bit is traversal (a
-/// write-path concern), whereas a socket cares only about non-group connect
-/// access.
+/// The kind of filesystem object being audited. The write-path and
+/// read-path exposure rules differ per kind. A directory's execute bit is
+/// traversal, a write-path concern. A socket cares only about a non-group
+/// connect access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PathKind {
     File,
@@ -401,11 +401,12 @@ const CREDENTIAL_FILE_EXPECTED_MODE: u32 = 0o600;
 /// - File: group/other **write** is `Error`; group/other **read** is `Warning`.
 /// - Directory: group/other **write or execute** is `Error` (traversal lets a
 ///   non-owner replace children); group/other **read** is `Warning`.
-/// - Socket: any **other** read/write is `Error` (a non-group user could
-///   connect); group access is intended, so there is no read-path widening.
+/// - Socket: any **other** read/write bit is `Error`. A non-group user can
+///   connect. Group access is intended, so there is no read-path widening.
 ///
-/// Anything with no exposure is `Ok`. The raw `st_mode` is masked to its
-/// permission bits internally, so callers may pass the value from `metadata`.
+/// Anything with no exposure is `Ok`. The function masks the raw `st_mode` to
+/// its permission bits internally, so callers can pass the value from
+/// `metadata` directly.
 fn classify_permissions(
     path_kind: PathKind,
     expected_owner_uid: u32,
@@ -464,10 +465,10 @@ fn classify_permissions(
     PermissionVerdict::Ok
 }
 
-/// Pure predicate classifying the policy file's owner and mode onto the tiered
-/// verdict scale, expressed in terms of the generic [`classify_permissions`]
-/// classifier: the policy file is a regular file owned by `ghbrk` expected at
-/// mode `0600`.
+/// Pure predicate classifying the policy file's owner and mode onto the
+/// tiered verdict scale. It calls the generic [`classify_permissions`]
+/// classifier: the policy file is a regular file, owned by `ghbrk`,
+/// expected at mode `0600`.
 fn classify_policy_permissions(
     observed_uid: u32,
     expected_uid: u32,
@@ -524,7 +525,7 @@ fn print_permission_verdict(label: &str, verdict: &PermissionVerdict) {
 }
 
 /// Classify a single [`PathAudit`] entry against the expected owner uid and
-/// permission mode.  An absent path is always an `Error`.
+/// permission mode. An absent path is always an `Error`.
 fn classify_path_audit(
     entry: &PathAudit,
     kind: PathKind,
@@ -546,9 +547,10 @@ fn classify_path_audit(
 /// Run the tiered permission classifier over all entries in a
 /// [`CredentialAudit`] frame and return one verdict per entry.
 ///
-/// The first entry is treated as a directory; the rest as regular files.
-/// Prints a `<label> permissions: OK|WARNING|ERROR` status line for every
-/// entry, and an additional line if the `ghbrk` owner uid cannot be resolved.
+/// The first entry is treated as a directory. The rest are treated as
+/// regular files. This prints a `<label> permissions: OK|WARNING|ERROR`
+/// status line for every entry. If the `ghbrk` owner uid cannot be
+/// resolved, it also prints one additional line.
 fn classify_credential_audit(audit: &CredentialAudit) -> Vec<PermissionVerdict> {
     let expected_uid = match resolve_owner_uid(CREDENTIAL_OWNER_USER) {
         Ok(uid) => uid,
@@ -586,9 +588,10 @@ fn classify_credential_audit(audit: &CredentialAudit) -> Vec<PermissionVerdict> 
     verdicts
 }
 
-/// Resolve a system user name to its uid, mapping the not-found and lookup-error
-/// cases onto a `Warning` verdict (the owner cannot be verified, but the absence
-/// of the service account is not itself a write-path exposure).
+/// Resolve a system user name to its uid. Maps the not-found and
+/// lookup-error cases onto a `Warning` verdict: the owner cannot be
+/// verified, but the absence of the service account is not a write-path
+/// exposure.
 fn resolve_owner_uid(user: &str) -> Result<u32, PermissionVerdict> {
     match nix::unistd::User::from_name(user) {
         Ok(Some(u)) => Ok(u.uid.as_raw()),

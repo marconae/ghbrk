@@ -7,12 +7,12 @@ use thiserror::Error;
 
 const WILDCARD: &str = "*";
 
-/// Operations that ghbrk recognises. Maps to YAML strings via snake_case.
+/// Operations that ghbrk recognizes. Each maps to a YAML string in snake_case.
 ///
-/// Every operation serialises to a bare snake_case tag — including
-/// `GhApiRead`, which serialises to `gh_api_read` and discards its `path`. A
-/// policy rule names operation *kinds*; the request-side `path` payload is not
-/// part of the policy vocabulary, so matching ignores it (see `same_kind`).
+/// Every operation serializes to a bare snake_case tag. `GhApiRead` serializes
+/// to `gh_api_read` and drops its `path` field. A policy rule names an
+/// operation kind, not a payload. The request's `path` field is not part of
+/// the policy vocabulary. `same_kind` ignores it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Operation {
     Push,
@@ -39,8 +39,8 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// True if this operation operates on a specific branch and therefore
-    /// should be matched against the rule's branch patterns.
+    /// True when the operation applies to a specific branch. The engine then
+    /// matches it against the rule's branch patterns.
     pub fn has_branch(&self) -> bool {
         matches!(self, Operation::Push)
     }
@@ -72,8 +72,9 @@ impl Operation {
         }
     }
 
-    /// Parse a snake_case operation tag into its variant, or `None` when the
-    /// tag is not part of the policy vocabulary. The inverse of [`tag`].
+    /// Parses a snake_case tag into its operation variant. Returns `None`
+    /// when the tag is not part of the policy vocabulary. This reverses
+    /// `tag`.
     pub fn parse(tag: &str) -> Option<Operation> {
         Operation::from_tag(tag)
     }
@@ -108,8 +109,9 @@ impl Operation {
         Some(op)
     }
 
-    /// True when two operations name the same kind, ignoring any payload such
-    /// as `GhApiRead`'s `path`. Policy rules match on kind, not payload.
+    /// True when two operations share the same kind. This ignores any
+    /// payload, such as `GhApiRead`'s `path` field. Policy rules match on
+    /// kind, not on payload.
     fn same_kind(&self, other: &Operation) -> bool {
         self.tag() == other.tag()
     }
@@ -131,9 +133,9 @@ impl<'de> Deserialize<'de> for Operation {
 
 /// How a rule names the operations it covers.
 ///
-/// Accepts either a bare role name (`operations: write`) or an inline list
-/// (`operations: [push, fetch]`). Role names are stored verbatim and resolved
-/// against the policy's role table at evaluation time.
+/// A rule uses a bare role name (`operations: write`) or an inline list
+/// (`operations: [push, fetch]`). The engine stores a role name as given and
+/// resolves it against the policy's role table when it evaluates a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationsSpec {
     Role(String),
@@ -302,14 +304,14 @@ pub enum PolicyError {
 }
 
 impl Policy {
-    /// Parse a YAML document and validate every rule strictly.
+    /// Parses a YAML document and validates every rule strictly.
     pub fn from_yaml(text: &str) -> Result<Self, PolicyError> {
         let policy: Policy = serde_yaml::from_str(text)?;
         policy.validate()?;
         Ok(policy)
     }
 
-    /// Read a YAML reader and validate.
+    /// Reads a YAML document from a reader and validates it.
     pub fn from_reader<R: io::Read>(reader: R) -> Result<Self, PolicyError> {
         let policy: Policy = serde_yaml::from_reader(reader)?;
         policy.validate()?;
@@ -349,8 +351,9 @@ impl Policy {
         Ok(())
     }
 
-    /// Resolve a role name to its operation set, preferring user-defined roles
-    /// over built-ins. Returns `None` for an unknown role.
+    /// Resolves a role name to its operation set. A user-defined role takes
+    /// priority over a built-in one with the same name. Returns `None` when
+    /// the role is unknown.
     pub fn resolve_role(&self, name: &str) -> Option<&[Operation]> {
         if let Some(operations) = self.roles.get(name) {
             return Some(operations.as_slice());
@@ -358,9 +361,9 @@ impl Policy {
         builtin_roles().get(name).map(Vec::as_slice)
     }
 
-    /// The concrete operations a rule covers, resolving any role reference
-    /// against this policy's role table. `None` only for an unresolved role,
-    /// which a validated policy never contains.
+    /// The concrete operations a rule covers. This resolves any role
+    /// reference against the policy's role table. Returns `None` only for an
+    /// unresolved role. A validated policy never has one.
     fn rule_operations<'a>(&'a self, rule: &'a Rule) -> Option<&'a [Operation]> {
         match &rule.operations {
             OperationsSpec::List(operations) => Some(operations.as_slice()),
@@ -368,8 +371,9 @@ impl Policy {
         }
     }
 
-    /// Evaluate `request` against the rules in document order, returning the
-    /// first matching rule's effect, or default-deny when none match.
+    /// Evaluates `request` against the rules in document order. Returns the
+    /// first matching rule's effect, or denies by default when no rule
+    /// matches.
     pub fn evaluate(&self, request: &Request<'_>) -> Decision {
         for rule in &self.rules {
             let Some(operations) = self.rule_operations(rule) else {

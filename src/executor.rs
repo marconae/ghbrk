@@ -1,26 +1,26 @@
-//! Child process executor with a real-time, full-duplex relay between the
-//! wire protocol and the spawned child.
+//! Child process executor. Relays the wire protocol and a spawned child's I/O
+//! in real time, in both directions.
 //!
-//! This module spawns the requested binary (`git`, `gh`, …), with the
-//! caller-supplied cwd and the broker-injected env vars, and relays both
-//! directions of its I/O. It reads `ClientFrame::StdinChunk` frames from the
-//! caller's client-frame source and writes their bytes to the child's stdin,
-//! while forwarding every chunk read from the child's stdout/stderr back as
-//! `StdoutChunk` / `StderrChunk` frames. The final frame is `Exit { code }`.
+//! This module spawns the requested binary (`git`, `gh`, and more), using the
+//! caller-supplied cwd and the broker-injected env vars. It reads
+//! `ClientFrame::StdinChunk` frames from the caller and writes their bytes to
+//! the child's stdin. It forwards every chunk from the child's stdout and
+//! stderr back as `StdoutChunk` and `StderrChunk` frames. The final frame is
+//! always `Exit { code }`.
 //!
-//! Both directions live in this one module because they constrain each other.
-//! Running them in sequence deadlocks in either order: a child writing output
-//! while it waits for input stalls a relay that reads input only once output
-//! has finished, and a child waiting for input stalls a relay that writes input
-//! only once output has finished. The two are therefore polled together, and
-//! the relay finishes on the output side — the input side completing is not
-//! the end of the relay, while the output side completing closes the child's
-//! stdin and ends it.
+//! Both directions live in this one module because each can block the other.
+//! Running them in sequence deadlocks either way. A child that writes output
+//! while it waits for input stalls a relay that reads input only after output
+//! ends. A child that waits for input stalls a relay that writes input only
+//! after output ends. The relay polls both sides together and ends when the
+//! output side ends. When the input side ends first, the relay continues.
+//! When the output side ends, the relay ends and closes the child's stdin.
 //!
-//! Memory bound: each stdout/stderr read is into a fixed-size 8 KiB buffer, and
-//! each stdin chunk is handed to the child before the next client frame is
-//! read. Neither direction keeps an accumulator, so a 100 MiB stream either way
-//! produces many small frames and never a resident copy of the whole stream.
+//! Memory bound: each stdout/stderr read fills a fixed 8 KiB buffer. Each
+//! stdin chunk goes to the child before the relay reads the next client
+//! frame. Neither direction buffers a running total, so a 100 MiB stream in
+//! either direction produces many small frames, never one large copy in
+//! memory.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -57,46 +57,46 @@ pub struct ChildSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
-    /// Effective UID the child should drop to before `execve`. `None` keeps the
+    /// Effective UID the child drops to before `execve`. `None` keeps the
     /// daemon's own identity.
     pub uid: Option<u32>,
-    /// Primary GID the child should drop to before `execve`. `None` keeps the
+    /// Primary GID the child drops to before `execve`. `None` keeps the
     /// daemon's own primary group.
     pub gid: Option<u32>,
     /// Supplementary GIDs applied via `setgroups` before the UID drop. Empty
-    /// when none are known or applicable.
+    /// when there are none.
     pub supplementary_gids: Vec<u32>,
     /// Home directory of the peer user, used to override the child's `HOME`
     /// when privilege is dropped. `None` keeps the inherited `HOME`.
     pub home: Option<PathBuf>,
 }
 
-/// Spawn the child described by `spec`, feed it the caller's standard input
+/// Spawn the child described by `spec`. Feed it the caller's standard input
 /// from `client_frames`, and stream its output to `writer`.
 ///
 /// The contract:
 ///
 /// - Stdin is a pipe fed by `ClientFrame::StdinChunk` frames read from
 ///   `client_frames`.
-/// - The input source is required rather than optional: a caller with nothing
-///   to send passes a source already at end-of-file, which closes the child's
-///   stdin at once and reproduces the previous `/dev/null` behaviour. Keeping
-///   the decision here rather than offering a switch is what keeps the
-///   deadlock rule in one place.
-/// - Stdout and stderr are piped and read concurrently with the input relay.
-/// - For every chunk read from stdout, one `StdoutChunk` frame is written.
-/// - For every chunk read from stderr, one `StderrChunk` frame is written.
-/// - The input relay ends at the first of `StdinEof`, end-of-file on
-///   `client_frames`, or a write failure on the child's stdin; the child's
-///   stdin is closed in every one of those cases, and the relay itself
-///   continues until the output side finishes.
-/// - On clean exit a final `Exit { code }` frame is written. No frame follows
-///   it.
-/// - On spawn failure (e.g. binary not found) a single `Denied { reason }`
-///   frame is written, `client_frames` is left unread, and the function
-///   returns `Ok(())`. The daemon must NOT crash on spawn failure.
-/// - The child's stdin handle is taken out of `Child` at spawn so the input
-///   relay can own it and close it independently of the child's other
+/// - The input source is required, not optional. A caller with nothing to
+///   send passes a source already at end-of-file. This closes the child's
+///   stdin at once, the same as the old `/dev/null` behavior, and keeps the
+///   deadlock rule in one place instead of adding a switch for it.
+/// - Stdout and stderr are piped and read at the same time as the input
+///   relay.
+/// - Each chunk read from stdout produces one `StdoutChunk` frame.
+/// - Each chunk read from stderr produces one `StderrChunk` frame.
+/// - The input relay ends at the first of: `StdinEof`, end-of-file on
+///   `client_frames`, or a write failure on the child's stdin. The child's
+///   stdin closes in every one of these cases. The relay itself continues
+///   until the output side ends.
+/// - On clean exit, the function writes a final `Exit { code }` frame. No
+///   frame follows it.
+/// - On spawn failure (for example, the binary is not found), the function
+///   writes one `Denied { reason }` frame, leaves `client_frames` unread, and
+///   returns `Ok(())`. The daemon must not crash on spawn failure.
+/// - At spawn, the child's stdin handle is taken out of `Child` so the input
+///   relay owns it and can close it independently of the child's other
 ///   handles.
 pub async fn stream_child<R, W>(
     spec: &ChildSpec,
@@ -114,7 +114,7 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Strip the parent env so secrets we did not whitelist cannot leak.
+        // Clear the parent env so secrets outside the allow list cannot leak.
         .env_clear();
     for (k, v) in &spec.env {
         command.env(k, v);
@@ -155,34 +155,37 @@ where
     Ok(())
 }
 
-/// Apply a fail-closed privilege drop to `command` based on `spec`.
+/// Apply a fail-closed privilege drop to `command`, based on `spec`.
 ///
-/// The drop is applied only when both `uid` and `gid` are present, the target
-/// uid is not root, and it differs from the daemon's own effective uid. Partial
-/// drops are never performed: a missing `uid` or `gid` skips the whole step so
-/// the child cannot end up with a mismatched identity.
+/// The drop runs only when `uid` and `gid` are both present, the target uid
+/// is not root, and the target uid differs from the daemon's own effective
+/// uid. A missing `uid` or `gid` skips the whole step. Partial drops never
+/// run, so the child cannot end up with a mismatched identity.
 ///
-/// Ordering: the whole drop runs inside a single `pre_exec` hook, in the order
-/// `setgroups` → `setresgid` → `setresuid` → `chdir`. This ordering is mandatory:
+/// Ordering: the whole drop runs inside one `pre_exec` hook, in this order:
+/// `setgroups`, then `setresgid`, then `setresuid`, then `chdir`. This order
+/// is mandatory.
 ///
-/// - `setgroups`/`setresgid` require `CAP_SETGID`, which is lost the moment the
-///   UID is dropped to a non-zero value, so they must come before `setresuid`.
-/// - `chdir` must come *after* `setresuid`: the standard library calls `chdir()`
-///   in the forked child **before** running `pre_exec` closures, which means the
-///   `Command::current_dir()` chdir runs as the daemon user and fails with EACCES
-///   on a 0700 home directory. We reset the command's working directory to `/`
-///   (always traversable) and perform the real `chdir` here, after the UID drop,
-///   so the kernel evaluates the path with the peer user's identity.
+/// - `setgroups` and `setresgid` need `CAP_SETGID`. The process loses this
+///   capability the moment the UID drops to a non-zero value, so both calls
+///   must run before `setresuid`.
+/// - `chdir` must run after `setresuid`. The standard library calls
+///   `chdir()` in the forked child before it runs `pre_exec` closures, so
+///   `Command::current_dir()` would chdir as the daemon user and fail with
+///   EACCES on a 0700 home directory. This function resets the command's
+///   working directory to `/` (always traversable) and does the real
+///   `chdir` here, after the UID drop, so the kernel checks the path against
+///   the peer user's identity.
 ///
-/// We deliberately do **not** use `CommandExt::uid()`/`gid()`: the standard
-/// library applies those (and its own internal `setgroups`) *before* running
-/// user `pre_exec` closures, which would drop the UID first and make our
-/// `setgroups` fail with `EPERM`. Performing every step inside one closure puts
-/// the ordering fully under our control.
+/// This function does not use `CommandExt::uid()`/`gid()`. The standard
+/// library applies those, and its own internal `setgroups`, before running
+/// `pre_exec` closures. That would drop the UID first and make the
+/// `setgroups` call here fail with `EPERM`. Doing every step inside one
+/// closure puts the order fully under this function's control.
 ///
-/// Fail-closed: any failing syscall returns `Err`, so `execve` never runs and
-/// the caller observes a spawn failure (surfaced as a `Denied` frame) rather
-/// than a child running with a partially-dropped identity.
+/// Fail-closed: any failing syscall returns `Err`. `execve` then never runs,
+/// and the caller sees a spawn failure (a `Denied` frame) instead of a child
+/// that runs with a partially-dropped identity.
 #[cfg(unix)]
 fn apply_privilege_drop(command: &mut Command, spec: &ChildSpec) {
     let (uid, gid) = match (spec.uid, spec.gid) {
@@ -208,18 +211,18 @@ fn apply_privilege_drop(command: &mut Command, spec: &ChildSpec) {
         .map(nix::unistd::Gid::from_raw)
         .collect();
 
-    // Reset the command's cwd to "/" so the pre-pre_exec chdir (which runs as
-    // the daemon user) always succeeds. The real chdir to spec.cwd is done
+    // Reset the command's cwd to "/" so the chdir that runs before `pre_exec`
+    // (as the daemon user) always succeeds. The real chdir to spec.cwd runs
     // inside the pre_exec closure below, after setresuid.
     let cwd = spec.cwd.clone();
     command.current_dir("/");
 
-    // SAFETY: the closure runs in the forked child between `fork` and `execve`,
-    // where the Rust runtime is in an undefined state. It performs only the
-    // `setgroups`/`setresgid`/`setresuid`/`chdir` syscalls and returns; it
-    // touches no shared runtime state. The `gids` vector and `cwd` path are
-    // pre-built before the closure (before `fork`), so no heap allocation occurs
-    // in the child, and no I/O.
+    // SAFETY: the closure runs in the forked child, between `fork` and
+    // `execve`, where the Rust runtime is in an undefined state. It only
+    // runs the `setgroups`, `setresgid`, `setresuid`, and `chdir` syscalls,
+    // and touches no shared runtime state. The `gids` vector and `cwd` path
+    // are built before the closure runs, before `fork`, so the child does no
+    // heap allocation and no I/O.
     unsafe {
         command.pre_exec(move || {
             let target_gid = nix::unistd::Gid::from_raw(gid);
@@ -229,11 +232,11 @@ fn apply_privilege_drop(command: &mut Command, spec: &ChildSpec) {
             // Set real, effective, and saved GID so the child cannot restore
             // its primary group after exec.
             nix::unistd::setresgid(target_gid, target_gid, target_gid).map_err(drop_error)?;
-            // UID last: this is the step that relinquishes CAP_SETUID/SETGID.
+            // UID last: this step gives up CAP_SETUID and CAP_SETGID.
             nix::unistd::setresuid(target_uid, target_uid, target_uid).map_err(drop_error)?;
-            // chdir after setresuid so the kernel evaluates the path as the
-            // peer user — required when the target directory sits inside a
-            // 0700 home dir that the daemon user cannot traverse.
+            // chdir after setresuid so the kernel checks the path as the peer
+            // user. This matters when the target directory sits inside a
+            // 0700 home dir that the daemon user cannot enter.
             nix::unistd::chdir(&cwd).map_err(drop_error)?;
             Ok(())
         });
@@ -253,21 +256,21 @@ fn drop_error(_err: nix::errno::Errno) -> std::io::Error {
 #[cfg(not(unix))]
 fn apply_privilege_drop(_command: &mut Command, _spec: &ChildSpec) {}
 
-/// Poll both relay directions together and finish when `output` finishes.
+/// Poll both relay directions together. End when `output` ends.
 ///
-/// This function is where the executor's deadlock rule lives. `input` finishing
-/// first is not the end of the relay — a child that has consumed all of its
-/// standard input still has output to produce — so polling continues on
-/// `output` alone. `output` finishing first ends the relay and drops `input`,
-/// which is what closes the child's standard input: the `ChildStdin` handle is
-/// owned by the input future, so cancelling it releases the pipe just as
+/// This function holds the executor's deadlock rule. When `input` ends
+/// first, the relay does not end: a child that has read all of its standard
+/// input can still have output to produce, so polling continues on `output`
+/// alone. When `output` ends first, the relay ends and drops `input`. This
+/// closes the child's standard input, because the input future owns the
+/// `ChildStdin` handle. Cancelling the future releases the pipe the same way
 /// completing it does.
 ///
-/// Both futures are pinned once and re-polled across iterations rather than
-/// rebuilt per iteration. That matters for `input`, which reads length-prefixed
-/// frames: rebuilding it after a `select!` iteration would restart a read that
-/// had already consumed a frame header, losing bytes out of the caller's
-/// standard input.
+/// Both futures are pinned once and polled again across iterations, instead
+/// of rebuilt each iteration. This matters for `input`, which reads
+/// length-prefixed frames. Rebuilding it after a `select!` iteration would
+/// restart a read that had already consumed a frame header, and lose bytes
+/// from the caller's standard input.
 async fn relay_until_output_ends<I, O, T>(input: I, output: O) -> T
 where
     I: Future<Output = ()>,
@@ -289,22 +292,23 @@ where
 }
 
 /// Write the caller's standard input, carried as `ClientFrame::StdinChunk`
-/// frames, to the child's standard input until the first of `StdinEof`,
+/// frames, to the child's standard input. Stop at the first of: `StdinEof`,
 /// end-of-file on `client_frames`, or a write failure on the child's stdin.
 ///
-/// Owning `child_stdin` is deliberate: the pipe closes when this future ends,
-/// whether it ran to completion or was cancelled by the output side finishing
-/// first, so a child that waits for end-of-file can always proceed. An absent
-/// handle means the spawn produced no stdin pipe; there is then nothing to feed
-/// and nothing to close, so the relay ends without consuming a client frame.
+/// This function owns `child_stdin` on purpose. The pipe closes when this
+/// future ends, whether it ran to completion or the output side cancelled it
+/// by ending first. This lets a child that waits for end-of-file always
+/// proceed. An absent handle means the spawn produced no stdin pipe. There is
+/// then nothing to feed and nothing to close, so the relay ends without
+/// reading a client frame.
 ///
-/// Neither a failed read nor a failed write is propagated, because neither
-/// makes the invocation a failure. The child has already been spawned, so the
-/// outcome that matters is its own exit code, and `Exit` must stay the final
-/// frame on the wire. A broken stdin pipe is the ordinary case of a child that
-/// read the body it wanted and exited while the caller still had bytes queued;
-/// a truncated or malformed client frame is a broken caller, and closing the
-/// child's stdin lets the child finish rather than aborting it mid-run.
+/// This function does not propagate a failed read or a failed write, because
+/// neither makes the call a failure. The child is already spawned, so only
+/// its own exit code matters, and `Exit` must stay the final frame on the
+/// wire. A broken stdin pipe is the normal case of a child that read the body
+/// it wanted and exited while the caller still had bytes queued. A truncated
+/// or malformed client frame means a broken caller. Closing the child's
+/// stdin lets the child finish instead of aborting it mid-run.
 async fn relay_stdin<R>(mut client_frames: R, child_stdin: Option<ChildStdin>)
 where
     R: AsyncRead + Unpin,
@@ -325,11 +329,11 @@ where
     }
 }
 
-/// Concurrently read from stdout and stderr, emitting one frame per read.
+/// Read from stdout and stderr at the same time. Emit one frame per read.
 ///
-/// We use `tokio::select!` over the two readers so the order in which bytes
-/// appear at the daemon is preserved on the wire (no merging, no per-stream
-/// buffering past one read).
+/// This function uses `tokio::select!` over the two readers so the wire
+/// keeps the order in which bytes arrive at the daemon: no merging, and no
+/// per-stream buffering past one read.
 async fn stream_pipes<O, E, W>(
     stdout: Option<O>,
     stderr: Option<E>,

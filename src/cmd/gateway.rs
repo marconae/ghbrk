@@ -1,17 +1,17 @@
 //! Broker-relay transport for the explicit `ghbrk git` / `ghbrk gh` gateways.
 //!
-//! Connects directly to the broker socket, writes a `Request` frame, streams
-//! the caller's own standard input to the broker behind it, and streams the
-//! broker's `ServerFrame` responses to the process's real stdio. The two
-//! directions run concurrently and the relay ends on the response side only:
-//! a child that writes output while it waits for more input would deadlock a
-//! client that finished sending before it started reading, and so would a
-//! daemon released before stdin forwarding existed, which never drains the
-//! stdin direction at all.
+//! The gateway connects to the broker socket, writes a `Request` frame, and
+//! streams the caller's standard input to the broker. At the same time it
+//! streams the broker's `ServerFrame` responses back to the process's stdio.
+//! Only the response direction ends the relay. A child that writes output
+//! while it waits for more input can deadlock a client that already
+//! finished sending. A broker released before stdin forwarding existed
+//! never drained the stdin direction, so ending the relay on stdin instead
+//! would repeat that same bug.
 //!
-//! Unlike the former transparent shim, there is no config, no passthrough
-//! exec, and no EACCES silent fall-through: if the broker cannot be reached,
-//! the gateway reports the failure and exits non-zero.
+//! This is not the former transparent shim. It has no config, no passthrough
+//! exec, and no silent fall-through on EACCES. If the broker is unreachable,
+//! the gateway reports the failure and exits with a non-zero code.
 
 use std::env;
 use std::io::IsTerminal;
@@ -26,7 +26,7 @@ use ghbrk::protocol::{
     read_frame, write_frame, ClientFrame, ProtocolError, Request, ServerFrame, Tool,
 };
 
-/// Default broker socket path, overridable via `GHBRK_SOCKET`.
+/// Default broker socket path. Set `GHBRK_SOCKET` to override it.
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/ghbrk/broker.sock";
 
 /// Environment variable that overrides the default broker socket path.
@@ -35,12 +35,12 @@ pub const SOCKET_ENV_VAR: &str = "GHBRK_SOCKET";
 /// Exit code used when the broker cannot be reached or the protocol fails.
 pub const GATEWAY_ERROR_EXIT: i32 = 1;
 
-/// Bytes carried by one `StdinChunk` frame. Held at the executor's own read
-/// bound so one read on the caller's side becomes one write on the child's,
-/// rather than a frame whose size the ceiling on frame length has to police.
+/// Bytes carried by one `StdinChunk` frame. This matches the executor's own
+/// read buffer, so one read from the caller becomes one write to the child.
+/// The frame-length limit does not need to police this size separately.
 const STDIN_CHUNK_SIZE: usize = ghbrk::executor::READ_BUF_SIZE;
 
-/// Resolve the broker socket path, honouring `GHBRK_SOCKET` when set.
+/// Returns the broker socket path, using `GHBRK_SOCKET` when set.
 pub fn socket_path_from_env() -> PathBuf {
     env::var_os(SOCKET_ENV_VAR)
         .map(PathBuf::from)
@@ -84,7 +84,7 @@ pub fn run_gateway(
 }
 
 /// Core async relay, generic over the stdio writers so it can be tested
-/// against in-memory buffers. Returns the exit code the caller should use.
+/// against in-memory buffers. Returns the exit code for the caller to use.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn relay<O, E>(
     tool: Tool,
@@ -115,13 +115,14 @@ where
 
 /// Standard input the gateway forwards for `tool`.
 ///
-/// `git` and `gh` spawn a child that may read standard input, so the caller's
-/// own is streamed to it. An interactive terminal is swapped for an empty
-/// source before any relay exists, so no code path can reach the terminal and
-/// capture keystrokes the user meant for their own shell, while the child
-/// still observes end-of-file rather than waiting. Every other tool spawns no
-/// child, forwards nothing, and by returning `None` here also declares no
-/// client frames on the wire.
+/// `git` and `gh` spawn a child that can read standard input, so the gateway
+/// streams the caller's own input to it. When stdin is an interactive
+/// terminal, the gateway swaps in an empty source instead. This stops any
+/// code path from reading the terminal and capturing keystrokes meant for
+/// the user's own shell. The child still sees end-of-file right away,
+/// instead of waiting for input that never arrives. Every other tool spawns
+/// no child and forwards nothing. Returning `None` here also tells the
+/// caller to send no client frames on the wire.
 fn caller_stdin(tool: Tool, stdin_is_terminal: bool) -> Option<Box<dyn AsyncRead + Unpin>> {
     match (tool, stdin_is_terminal) {
         (Tool::Git | Tool::Gh, false) => Some(Box::new(tokio::io::stdin())),
@@ -130,15 +131,15 @@ fn caller_stdin(tool: Tool, stdin_is_terminal: bool) -> Option<Box<dyn AsyncRead
     }
 }
 
-/// Connect, send `request`, and relay both directions until the broker reports
-/// an exit code.
+/// Connect, send `request`, and relay both directions until the broker
+/// reports an exit code.
 ///
-/// `stdin` present means client frames follow the request, which is the same
-/// fact `request.client_frames` declares to the broker; absent means the
-/// request is the only frame this direction ever carries, and the write half
-/// stays open for the whole response exactly as it did before stdin forwarding
-/// existed. Only the response direction can end the relay: the stdin direction
-/// may never end at all.
+/// When `stdin` is present, client frames follow the request. This matches
+/// the fact that `request.client_frames` already declares to the broker.
+/// When `stdin` is absent, the request is the only frame this direction ever
+/// carries, and the write half stays open for the whole response, the same
+/// as before stdin forwarding existed. Only the response direction can end
+/// the relay. The stdin direction can run forever.
 async fn relay_request<O, E, S>(
     request: Request,
     socket_path: &Path,
@@ -187,14 +188,15 @@ where
     }
 }
 
-/// Stream `source` to the broker as `StdinChunk` frames and close that
-/// direction behind them, so the child observes end-of-file exactly when the
+/// Stream `source` to the broker as `StdinChunk` frames, then close that
+/// direction. The child then sees end-of-file at the same point the
 /// caller's own standard input does.
 ///
-/// Every exit path shuts the direction down, including the one where a write
-/// failure loses the `StdinEof` frame: a broker that never sees end-of-file
-/// leaves the child waiting for input that cannot arrive. A failure to read
-/// the caller's standard input is end-of-file too, for the same reason.
+/// Every exit path shuts the direction down, even the path where a write
+/// failure loses the `StdinEof` frame. A broker that never sees end-of-file
+/// leaves its child waiting for input that will not arrive. For the same
+/// reason, a failed read of the caller's standard input also counts as
+/// end-of-file.
 async fn pump_stdin<W, S>(mut writer: W, mut source: S)
 where
     W: AsyncWrite + Unpin,
@@ -217,9 +219,9 @@ where
     let _ = writer.shutdown().await;
 }
 
-/// Stream the broker's response frames to `stdout` and `stderr` and return the
-/// exit code the caller should use. This is the direction that decides the
-/// relay's outcome; nothing that happens on the stdin direction changes it.
+/// Stream the broker's response frames to `stdout` and `stderr`, and return
+/// the exit code the caller must use. This direction alone decides the
+/// relay's outcome. Nothing on the stdin direction changes it.
 async fn read_responses<R, O, E>(mut reader: R, stdout: &mut O, stderr: &mut E) -> i32
 where
     R: AsyncRead + Unpin,
@@ -286,21 +288,22 @@ mod tests {
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
 
-    /// Payload whose framed encoding is several times the default socket
-    /// buffer, so a direction nobody drains blocks instead of disappearing
-    /// into the kernel.
+    /// Payload sized several times past the default socket buffer, so a
+    /// direction nobody drains blocks instead of the kernel quietly
+    /// absorbing it.
     const PAYLOAD_EXCEEDING_SOCKET_BUFFER: usize = 256 * 1024;
 
-    /// Liveness bound: every relay under test either finishes promptly or is
-    /// deadlocked, so a generous limit separates the two without racing.
+    /// Liveness bound for these tests. Each relay under test either finishes
+    /// quickly or deadlocks, so this generous limit tells the two cases
+    /// apart without a race.
     const RELAY_MUST_FINISH_WITHIN: Duration = Duration::from_secs(10);
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
     }
 
-    /// A pipe an unrelated process holds open: it yields no byte and never
-    /// reaches end-of-file.
+    /// A pipe that stays open in another process. It yields no bytes and
+    /// never reaches end-of-file.
     struct NeverEnds;
 
     impl AsyncRead for NeverEnds {
@@ -354,8 +357,9 @@ mod tests {
             .collect()
     }
 
-    /// Relay a `gh` invocation, declaring client frames exactly when a source
-    /// is supplied, the way `relay` derives the two from one decision.
+    /// Relay a `gh` invocation. It declares client frames exactly when a
+    /// source is given, the same way `relay` derives both facts from one
+    /// decision.
     async fn relay_gh<S>(
         socket: &Path,
         stdin: Option<S>,
@@ -698,8 +702,9 @@ mod tests {
         let server = stub_broker(&socket, |stream| async move {
             let mut stream = stream;
             let _request: Request = read_frame(&mut stream).await.expect("request frame");
-            // Close only the receiving direction: every further stdin write
-            // fails with a broken pipe while the exit frame stays deliverable.
+            // Close only the receiving direction. Every later stdin write
+            // then fails with a broken pipe, but the exit frame still gets
+            // through.
             let closed_for_reading = stream.into_std().expect("into_std");
             closed_for_reading
                 .shutdown(Shutdown::Read)

@@ -1,11 +1,11 @@
-//! Broker server: accepts shim connections on a Unix socket, identifies the
-//! caller via SO_PEERCRED, runs the resolver and policy engine, writes an
-//! audit record, and either streams the executed child's output or sends a
+//! Broker server: accepts shim connections on a Unix socket, checks the
+//! caller's identity with SO_PEERCRED, runs the resolver and policy engine,
+//! writes an audit record, and streams the child's output back or sends a
 //! `Denied` frame.
 //!
-//! Per-connection failures (malformed frames, unknown caller, resolver/policy
-//! errors, executor failures) MUST NOT crash the daemon. The accept loop only
-//! terminates on SIGINT, SIGTERM, or a fatal bind error.
+//! A per-connection failure (a bad frame, an unknown caller, a resolver or
+//! policy error, an executor failure) must not crash the daemon. The accept
+//! loop stops only on SIGINT, SIGTERM, or a fatal bind error.
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -43,23 +43,23 @@ pub const CLIENT_GROUP_NAME: &str = "ghbrk-clients";
 
 /// Configuration for [`run_broker`].
 pub struct BrokerConfig {
-    /// Filesystem path the broker should bind.
+    /// Filesystem path where the broker binds its socket.
     pub socket_path: PathBuf,
-    /// Swappable policy handle. Each connection reads a snapshot; the allow
+    /// Swappable policy handle. Each connection reads one snapshot. The allow
     /// handler hot-reloads by storing a fresh `Arc<Policy>` into this handle.
     pub policy: Arc<ArcSwap<Policy>>,
     /// Path to the policy file on disk. The allow handler appends a rule here
     /// and reloads it into the swappable handle.
     pub policy_path: PathBuf,
-    /// Audit logger; shared with the daemon process for flush-on-shutdown.
+    /// Audit logger, shared with the daemon process so it can flush on shutdown.
     pub audit_logger: Arc<AuditLogger>,
-    /// Optional credential root override (for tests). When `None`, the
-    /// production default `/etc/ghbrk/credentials` is used.
+    /// Optional credential root override for tests. `None` selects the
+    /// production default `/etc/ghbrk/credentials`.
     pub credentials_root: Option<PathBuf>,
 }
 
-/// Errors that bubble all the way out of [`run_broker`]. Per-connection errors
-/// are handled internally and never become a `BrokerError`.
+/// Errors that reach [`run_broker`]'s caller. The broker handles every
+/// per-connection error internally; none of them become a `BrokerError`.
 #[derive(Debug, Error)]
 pub enum BrokerError {
     #[error("failed to bind unix socket {path}: {source}")]
@@ -106,10 +106,10 @@ pub async fn run_broker(config: BrokerConfig) -> Result<(), BrokerError> {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _addr)) => {
-                        // Snapshot the current policy at accept time. In-flight
-                        // connections keep their snapshot across a later swap.
-                        // The swappable handle and policy path travel alongside
-                        // so the allow handler can hot-reload after a write.
+                        // Snapshot the policy at accept time. A later swap does
+                        // not affect connections already in flight. The handle
+                        // and path travel with the snapshot so the allow
+                        // handler can still hot-reload after a write.
                         let policy = policy_handle.load_full();
                         let handle = Arc::clone(&policy_handle);
                         let path = Arc::clone(&policy_path);
@@ -148,16 +148,17 @@ pub async fn run_broker(config: BrokerConfig) -> Result<(), BrokerError> {
 }
 
 fn bind_listener(socket_path: &Path) -> Result<UnixListener, BrokerError> {
-    // Set umask to 0o077 so the socket is created with no group/other access
-    // from the start, closing the race window between bind and chmod. The
-    // owner-execute bit is deliberately left unmasked: umask is process-wide,
-    // so during this brief window any file/directory another thread creates
-    // (notably temp dirs in the test suite) would otherwise lose its
-    // owner-traverse bit and become unusable. `apply_socket_permissions` widens
-    // the socket back to the intended 0o660 immediately after bind.
+    // Set umask to 0o077 so the socket starts with no group or other access,
+    // closing the race window between bind and chmod. The owner-execute bit
+    // stays unmasked on purpose. umask is process-wide, so during this brief
+    // window any file or directory another thread creates (for example a temp
+    // dir in the test suite) would otherwise lose its owner-traverse bit and
+    // become unusable. `apply_socket_permissions` widens the socket back to
+    // 0o660 right after bind.
     //
-    // umask is process-wide, so we hold a lock to prevent concurrent calls
-    // (e.g. in tests) from observing the wrong umask while we bind.
+    // umask is process-wide, so this function holds a lock. It stops a
+    // concurrent call (for example in tests) from observing the wrong umask
+    // during this bind.
     let _guard = UMASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let old_mask = umask(Mode::from_bits_truncate(0o077));
     let result = UnixListener::bind(socket_path).map_err(|source| BrokerError::Bind {
@@ -176,8 +177,8 @@ fn apply_socket_permissions(socket_path: &Path) -> Result<(), BrokerError> {
 }
 
 fn apply_socket_group(socket_path: &Path) {
-    // Best-effort: only chgrp if the named group actually exists. Failing here
-    // is recoverable for development setups.
+    // Best effort: chgrp only if the named group exists. A failure here is
+    // fine for a development setup.
     let group = match Group::from_name(CLIENT_GROUP_NAME) {
         Ok(Some(g)) => g,
         Ok(None) => {
@@ -196,7 +197,7 @@ fn apply_socket_group(socket_path: &Path) {
 }
 
 /// Change the socket file's group to the resolved client-group GID. On
-/// failure, emit an `error!`-level log naming the systemd `Group=` directive
+/// failure, log at `error!` level and name the systemd `Group=` directive
 /// that fixes the misconfiguration. Exposed for the broker integration tests.
 pub fn chown_socket_to_client_group(socket_path: &Path, gid: Gid) {
     if let Err(err) = chown(socket_path, None, Some(gid)) {
@@ -208,8 +209,8 @@ pub fn chown_socket_to_client_group(socket_path: &Path, gid: Gid) {
     }
 }
 
-/// Resolved Unix identity of a connected peer, derived from `SO_PEERCRED` and
-/// the password database. Carries everything the executor needs to drop
+/// Resolved Unix identity of a connected peer, from `SO_PEERCRED` and the
+/// password database. Carries everything the executor needs to drop
 /// privileges to the calling user.
 pub struct PeerIdentity {
     /// Login name from the password database.
@@ -218,18 +219,18 @@ pub struct PeerIdentity {
     pub uid: u32,
     /// Primary numeric group ID.
     pub gid: u32,
-    /// Supplementary group IDs (excludes the primary GID semantics handled by
-    /// the kernel). Empty when enumeration failed.
+    /// Supplementary group IDs, excluding the primary GID (the kernel handles
+    /// that separately). Empty when enumeration failed.
     pub supplementary_gids: Vec<u32>,
     /// Home directory from the password database.
     pub home: PathBuf,
 }
 
 /// Resolve the peer of a connected stream into a full Unix identity. Returns
-/// `None` (deny) when the kernel refuses the credentials lookup or the UID has
-/// no entry in the password database. A failure to enumerate supplementary
-/// groups is non-fatal: it degrades to an empty supplementary list while the
-/// primary GID still applies.
+/// `None` (deny) when the kernel refuses the credentials lookup, or the UID
+/// has no entry in the password database. A failure to enumerate
+/// supplementary groups is not fatal: the identity degrades to an empty
+/// supplementary list, and the primary GID still applies.
 pub fn peer_identity(stream: &UnixStream) -> Option<PeerIdentity> {
     let cred = match getsockopt(&stream.as_fd(), PeerCredentials) {
         Ok(c) => c,
@@ -259,9 +260,9 @@ pub fn peer_identity(stream: &UnixStream) -> Option<PeerIdentity> {
     })
 }
 
-/// Enumerate the supplementary groups for a user via `getgrouplist`. Returns an
-/// empty list (and logs a warning) when the username cannot be turned into a
-/// `CString` or the lookup fails; the primary GID is unaffected.
+/// Enumerate the supplementary groups for a user via `getgrouplist`. Returns
+/// an empty list, and logs a warning, when the username cannot become a
+/// `CString` or the lookup fails. The primary GID is unaffected either way.
 fn supplementary_gids_for(username: &str, primary: Gid) -> Vec<u32> {
     let name = match std::ffi::CString::new(username) {
         Ok(name) => name,
@@ -300,9 +301,9 @@ pub fn username_for_uid(uid: Uid) -> Option<String> {
 }
 
 /// Everything a single connection's handler needs from the daemon: the policy
-/// snapshot taken at accept time, the swappable handle and on-disk path used by
-/// the allow handler to hot-reload after a write, the audit logger, and the
-/// optional credentials-root override.
+/// snapshot taken at accept time, the audit logger, and the optional
+/// credentials-root override. It also carries the swappable handle and its
+/// on-disk path, which the allow handler uses to hot-reload after a write.
 struct ConnectionContext {
     policy: Arc<Policy>,
     policy_handle: Arc<ArcSwap<Policy>>,
@@ -330,8 +331,8 @@ async fn handle_connection(
         Ok(req) => req,
         Err(err) => {
             warn!(error = %err, user = %identity.username, "malformed request frame");
-            // Best-effort tell the client; ignore failures because the wire
-            // may already be unrecoverable.
+            // Best effort: tell the client. Ignore failures, since the wire
+            // may already be unusable.
             send_denied(&mut stream, "malformed request").await.ok();
             return Ok(());
         }
@@ -351,10 +352,10 @@ async fn process_request(
     let credentials_root = ctx.credentials_root.as_deref().map(|a| a.as_path());
     let username = identity.username.as_str();
 
-    // The privileged `allow` mutation routes before resolve/policy: it neither
-    // resolves a repo URL nor consults the (read-path) policy. It validates the
-    // grant against the live role vocabulary, appends to the policy file, and
-    // hot-reloads the swappable handle.
+    // The privileged `allow` mutation routes before resolve and policy. It
+    // neither resolves a repo URL nor consults the read-path policy. Instead,
+    // it validates the grant against the live role vocabulary, appends to the
+    // policy file, and hot-reloads the swappable handle.
     if request.tool == Tool::Allow {
         handle_allow(
             stream,
@@ -369,7 +370,7 @@ async fn process_request(
         return Ok(());
     }
 
-    // Query tools resolve + evaluate policy without executing anything.
+    // Query tools resolve and evaluate policy without executing anything.
     if request.tool == Tool::Explain {
         return handle_explain_request(stream, &request, username, policy).await;
     }
@@ -377,7 +378,7 @@ async fn process_request(
         return handle_policy_request(stream, &request, username, policy).await;
     }
 
-    // Short-circuit for Tool::Check — runs health checks as the broker user.
+    // Short circuit for Tool::Check: runs health checks as the broker user.
     // No resolver, no policy evaluation, no audit record.
     if request.tool == Tool::Check {
         let creds_root = match credentials_root {
@@ -392,16 +393,17 @@ async fn process_request(
         return handle_check_request(stream, inputs).await;
     }
 
-    // `gh` passthrough invocations (anything that is not a broker-op, e.g.
-    // `gh repo view`, `gh auth status`) bypass resolve and policy but still
-    // receive `GH_TOKEN` injection so the wrapped `gh` is authenticated.
+    // A `gh` passthrough invocation (anything that is not a broker op, for
+    // example `gh repo view` or `gh auth status`) bypasses resolve and
+    // policy. It still gets `GH_TOKEN` injected so the wrapped `gh`
+    // authenticates.
     if request.tool == Tool::Gh && !gh_is_broker_op(&request.args) {
         return handle_gh_passthrough(stream, &request, identity, audit, credentials_root).await;
     }
 
-    // Defence-in-depth: the `ghbrk git` gateway already filters local-only
-    // subcommands client-side, but a hand-crafted client could still submit
-    // one. Reject it here before any resolve or execution.
+    // Defense in depth: the `ghbrk git` gateway already filters local-only
+    // subcommands on the client side, but a hand-crafted client could still
+    // submit one. Reject it here before any resolve or execution.
     if request.tool == Tool::Git && !git_is_remote_op(&request.args) {
         let reason = "local git operations must be run directly, not through ghbrk";
         write_audit(
@@ -508,7 +510,6 @@ async fn process_request(
         }
     }
 
-    // Build credential env vars.
     let creds = match load_user_credentials(username, credentials_root) {
         Ok(c) => c,
         Err(err) => {
@@ -518,11 +519,10 @@ async fn process_request(
         }
     };
 
-    // The `_keepalive` binding holds the askpass tempfile alive for the
-    // duration of the git invocation; dropping it removes the script. The
-    // `_agent_keepalive` binding holds the SSH agent escrow alive for the
-    // duration of `stream_child()`; dropping it kills the agent and removes
-    // its temp dir (socket included).
+    // `_keepalive` holds the askpass tempfile alive for the git invocation.
+    // Dropping it removes the script. `_agent_keepalive` holds the SSH agent
+    // escrow alive for `stream_child()`. Dropping it kills the agent and
+    // removes its temp dir, including the socket.
     let (env, _keepalive, _agent_keepalive) =
         match build_env(&request.tool, &resolved, &creds).await {
             Ok(p) => p,
@@ -548,19 +548,20 @@ async fn process_request(
     Ok(())
 }
 
-/// Spawn the child described by `spec` and relay it over the caller's open
+/// Spawn the child described by `spec`. Relay it over the caller's open
 /// connection, then close the broker's side of that connection.
 ///
-/// The connection is split here, at the spawn, and nowhere earlier. That
-/// placement is the guarantee that a request which never reaches this point —
-/// denied by policy, unresolvable, or missing credentials — is answered
-/// without a byte of the caller's standard input ever being read.
+/// The connection is split here, at the spawn, and nowhere earlier. This
+/// placement guarantees that a request which never reaches this point
+/// (denied by policy, unresolvable, or missing credentials) is answered
+/// without the broker reading a single byte of the caller's standard input.
 ///
-/// A request that declared client frames hands the executor the read half,
-/// which carries them. One that did not hands it a source already at
-/// end-of-file: such a caller holds its write half open for the whole
-/// response, so a relay reading the connection would wait on a frame that
-/// never arrives while the child waits on a pipe that never closes.
+/// A request that declared client frames gives the executor the read half,
+/// which carries those frames. A request that did not declare client frames
+/// gives the executor a source that is already at end of file. Such a caller
+/// keeps its write half open for the whole response. Without this split, a
+/// relay reading the connection would wait on a frame that never arrives,
+/// while the child waits on a pipe that never closes.
 async fn stream_child_over_connection(
     spec: &ChildSpec,
     request: &Request,
@@ -582,10 +583,10 @@ async fn stream_child_over_connection(
 /// grant against the live role vocabulary, append the rule to the policy file
 /// atomically, hot-reload the swappable handle, and stream a confirmation.
 ///
-/// Generic over the writer so it can be driven by the broker's `UnixStream` in
-/// production and by an in-memory duplex stream in tests. Never reads from the
-/// stream and never spawns a subprocess. A returned `Ok(())` means every frame
-/// was written cleanly, regardless of whether the grant was allowed or denied.
+/// Generic over the writer, so a `UnixStream` drives it in production and an
+/// in-memory duplex stream drives it in tests. It never reads from the stream
+/// and never spawns a subprocess. A returned `Ok(())` means every frame was
+/// written cleanly, whether the grant was allowed or denied.
 pub async fn handle_allow<W>(
     writer: &mut W,
     args: &[String],
@@ -599,9 +600,9 @@ where
 {
     let username = identity.username.as_str();
 
-    // Privilege gate: only an effective UID 0 peer may mutate the policy. This
-    // keeps the trust boundary on the privileged daemon, per the mission's
-    // privilege-separation model.
+    // Privilege gate: only a peer with effective UID 0 can change the policy.
+    // This keeps the trust boundary on the privileged daemon, per the
+    // mission's privilege-separation model.
     if identity.uid != 0 {
         let reason = "allow requires elevated privileges (root)".to_string();
         audit_allow(audit, username, args, "", "", &deny(&reason)).await;
@@ -641,8 +642,8 @@ where
         effect: Effect::Allow,
     };
 
-    // Append + atomic rename happen on a blocking thread; the file work is
-    // synchronous and must not stall the async executor under load.
+    // The append and the atomic rename run on a blocking thread. This file
+    // work is synchronous and must not stall the async executor under load.
     let path = policy_path.to_path_buf();
     let append_result =
         tokio::task::spawn_blocking(move || append_rule_atomically(&path, &rule)).await;
@@ -681,9 +682,9 @@ where
         }
     };
 
-    // Reload from the freshly written file so the swapped handle matches disk
-    // exactly, then publish it. A parse failure here means the file we just
-    // wrote is somehow invalid; surface it rather than swapping in garbage.
+    // Reload from the freshly written file, so the swapped handle matches disk
+    // exactly, then publish it. A parse failure here means the newly written
+    // file is invalid. Report that error instead of swapping in bad data.
     match Policy::from_yaml(&new_text) {
         Ok(reloaded) => policy_handle.store(Arc::new(reloaded)),
         Err(err) => {
@@ -807,10 +808,10 @@ fn parse_operations_spec(operands: &[&str]) -> Result<OperationsSpec, String> {
     Ok(OperationsSpec::List(ops))
 }
 
-/// True when `name` resolves as a role in the built-in vocabulary. A standalone
-/// helper backed by an empty policy: it covers the built-ins (`read-only`,
-/// `write`, `maintain`, `admin`) that exist without declaration, which is what
-/// the operand classifier needs before the live-policy validation step.
+/// True when `name` resolves as a role in the built-in vocabulary
+/// (`read-only`, `write`, `maintain`, `admin`). These roles exist without
+/// declaration, so the operand classifier needs this check before the
+/// live-policy validation step runs.
 fn is_known_role(name: &str) -> bool {
     Operation::parse(name).is_none() && BUILTIN_ROLE_NAMES.contains(&name)
 }
@@ -837,7 +838,7 @@ fn validate_grant(operations: &OperationsSpec, policy: &Policy) -> Result<(), St
 }
 
 /// Read the current policy file, append `rule`, and write the re-serialised
-/// document back atomically via a temp file in the same directory plus a
+/// document back atomically, via a temp file in the same directory plus a
 /// rename. Returns the serialised text on success. Never partially writes the
 /// destination: a crash mid-write leaves the original file intact.
 fn append_rule_atomically(policy_path: &Path, rule: &Rule) -> io::Result<String> {
@@ -908,12 +909,12 @@ async fn audit_allow(
     .await;
 }
 
-/// Returns `true` when a `gh` invocation is a broker-mediated operation
-/// (subject to resolve + policy). When `false`, the broker treats it as a
+/// Returns `true` when a `gh` invocation is a broker-mediated operation,
+/// subject to resolve and policy. When `false`, the broker treats it as a
 /// passthrough: it still injects `GH_TOKEN` but bypasses resolve and policy.
 /// All `gh release` lifecycle subcommands (create, delete, delete-asset,
-/// download, edit, list, upload, view) are broker-mediated; other read-only
-/// invocations such as `gh repo view` or `gh auth status` remain passthrough.
+/// download, edit, list, upload, view) are broker-mediated. Other read-only
+/// invocations, such as `gh repo view` or `gh auth status`, stay passthrough.
 fn gh_is_broker_op(args: &[String]) -> bool {
     let mut positional = args.iter().filter(|a| !a.starts_with('-'));
     let group = positional.next().map(String::as_str).unwrap_or("");
@@ -1003,9 +1004,9 @@ async fn handle_check_request(
         write_frame(stream, &ServerFrame::StdoutChunk { data: output }).await?;
     }
 
-    // Report observed owner/mode of the credential dir and files. The caller
-    // cannot stat these paths (broker-owned, mode 0700), so it relies on the
-    // broker to proxy the stat and runs the permission classifier client-side.
+    // Report the observed owner and mode of the credential dir and files. The
+    // caller cannot stat these broker-owned, mode-0700 paths itself, so the
+    // broker proxies the stat and the caller runs the classifier client-side.
     let audit = crate::health_check::audit_credential_paths(creds_root, username);
     write_frame(stream, &ServerFrame::CredentialAudit { audit }).await?;
 
@@ -1064,8 +1065,8 @@ fn git_first_subcommand(args: &[String]) -> Option<&str> {
     None
 }
 
-/// Resolve + evaluate a request without executing it, streaming a human
-/// readable explanation back to the client. Never spawns a subprocess.
+/// Resolve and evaluate a request without executing it, and stream a
+/// human-readable explanation back to the client. Never spawns a subprocess.
 async fn handle_explain_request(
     stream: &mut UnixStream,
     request: &Request,
@@ -1318,16 +1319,15 @@ fn load_user_credentials(
     }
 }
 
-/// Env var bindings plus optional RAII keep-alive guards (HTTPS askpass script, SSH agent).
+/// Env var bindings, plus optional RAII keep-alive guards for the HTTPS
+/// askpass script and the SSH agent escrow.
 type BuiltEnv = (
     Vec<(String, String)>,
     Option<crate::credentials::HttpsGitEnv>,
     Option<SshAgentHandle>,
 );
 
-/// Build the env-var pairs for the chosen tool and URL scheme. Returns the
-/// vars plus optional keep-alive RAII guards (the HTTPS askpass script and the
-/// SSH agent escrow).
+/// Build the env-var pairs for the chosen tool and URL scheme.
 async fn build_env(
     tool: &Tool,
     resolved: &ResolvedRequest,
@@ -1522,8 +1522,8 @@ mod tests {
 
     #[test]
     fn operation_name_covers_all_variants() {
-        // Compile-time exhaustive: ensure no variant is missed by ensuring at
-        // least the common ones produce non-empty strings.
+        // Covers every variant at compile time: each must produce a
+        // non-empty name.
         for op in [
             Operation::Push,
             Operation::Fetch,

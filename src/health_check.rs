@@ -1,19 +1,17 @@
 //! Credential health checks shared by `ghbrk check` and the broker.
 //!
-//! These run inside the broker process (as the `ghbrk` user) so that
-//! credential files owned by `ghbrk` can actually be read. Output is written
-//! to a caller-supplied writer rather than stdout so the broker can stream it
-//! back to the invoking client.
+//! These checks run inside the broker process, as the `ghbrk` user. This
+//! lets them read credential files that only `ghbrk` can read. Each check
+//! writes its output to a caller-supplied writer, not to stdout, so the
+//! broker can stream the output back to the client.
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
+use crate::credentials::{PERMISSION_MASK, REQUIRED_MODE};
 use crate::protocol::{CredentialAudit, PathAudit, TmpIdentity};
-
-const REQUIRED_MODE: u32 = 0o600;
-const PERMISSION_MASK: u32 = 0o777;
 
 /// Label for the per-user credential directory entry in a [`CredentialAudit`].
 const CREDENTIAL_DIR_LABEL: &str = "Credential dir";
@@ -31,20 +29,22 @@ pub enum GithubResult {
     Unreachable,
 }
 
-/// Runs all credential health checks for `user` rooted at `creds_root`,
-/// writing one status line per check to `out`. When `caller_tmp` carries the
-/// caller's own `/tmp` identity, also runs the shared-filesystem check
-/// against the broker's own `/tmp`; when it is absent (a client released
-/// before that check existed), no `Shared filesystem:` line is emitted and
-/// the check does not affect the result. Returns `true` iff every check that
-/// ran passed.
+/// Runs all credential health checks for `user` under `creds_root`. Writes
+/// one status line per check to `out`.
 ///
-/// The shared-filesystem check runs first and independently of the credential
-/// checks: it is a purely local comparison of two integers, it must not wait
-/// behind the GitHub round trip, and a daemon that supports it must report it
-/// on every path — clients read the absence of a `Shared filesystem:` line as
-/// version skew, so skipping it for an unrelated credential fault would
-/// diagnose the wrong cause.
+/// When `caller_tmp` carries the caller's own `/tmp` identity, this function
+/// also runs the shared-filesystem check against the broker's own `/tmp`.
+/// When `caller_tmp` is absent, the client predates that check: this
+/// function then writes no `Shared filesystem:` line, and the check does
+/// not affect the result. Returns `true` only when every check that runs
+/// passes.
+///
+/// The shared-filesystem check runs first and does not depend on the
+/// credential checks. It compares two integers on the local host, so it
+/// must not wait for the GitHub round trip. A daemon that supports this
+/// check must report it on every path. A client reads a missing `Shared
+/// filesystem:` line as version skew, so skipping the line for an unrelated
+/// credential fault would point to the wrong cause.
 pub fn run_checks(inputs: CheckInputs<'_>, out: &mut impl Write) -> bool {
     let mut all_ok = true;
     if let Some(caller_tmp) = inputs.caller_tmp {
@@ -65,41 +65,41 @@ pub fn run_checks(inputs: CheckInputs<'_>, out: &mut impl Write) -> bool {
     all_ok
 }
 
-/// Inputs [`run_checks`] needs: the credential root and user to check, and
-/// the caller's own `/tmp` identity when the client sent one. Bundled into
-/// one struct so `run_checks` (and `handle_check_request`, which builds this
-/// value) stay within the function-argument-count guardrail as more checks
-/// are added.
+/// Inputs for [`run_checks`]: the credential root and user to check, and the
+/// caller's own `/tmp` identity when the client sent one. This struct groups
+/// the inputs into one value, so `run_checks` and `handle_check_request`
+/// (which builds this value) stay within the function-argument-count
+/// guardrail as more checks arrive.
 pub struct CheckInputs<'a> {
     pub creds_root: &'a Path,
     pub user: &'a str,
     pub caller_tmp: Option<TmpIdentity>,
 }
 
-/// Path the broker's own `/tmp` is checked at.
+/// Path of the broker's own `/tmp`, checked by the shared-filesystem check.
 const BROKER_TMP_PATH: &str = "/tmp";
 
-/// Prefix of the shared-filesystem check's status line. Shared with
-/// `src/cmd/doctor.rs`, which detects the line by this same prefix and emits
-/// two more lines carrying it (`SKIPPED`, `UNSUPPORTED`); both sides must
-/// spell it identically for that wire contract to hold.
+/// Prefix of the shared-filesystem check's status line. `src/cmd/doctor.rs`
+/// detects the line by this same prefix, and also emits two more lines with
+/// it (`SKIPPED`, `UNSUPPORTED`). Both sides must spell the prefix the same
+/// way, or the wire contract between them breaks.
 pub const SHARED_FILESYSTEM_LABEL: &str = "Shared filesystem:";
 
-/// Installed unit file a mismatch's remediation names: removing
-/// `PrivateTmp=` from this file and restarting the service restores a
-/// shared `/tmp` for the spawned child.
+/// Path of the installed systemd unit file. The remediation message for a
+/// mismatch names this file: removing `PrivateTmp=` from it and restarting
+/// the service restores a shared `/tmp` for the spawned child.
 const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/ghbrk.service";
 
 /// Stats `tmp_path` (the broker's own `/tmp` in production) and compares it
-/// against `caller_tmp`, the identity the caller stat'd in its own namespace.
-/// Writes one [`SHARED_FILESYSTEM_LABEL`] line and returns whether the two
-/// identities match.
+/// against `caller_tmp`, the identity the caller stat'd in its own
+/// namespace. Writes one [`SHARED_FILESYSTEM_LABEL`] line and returns
+/// whether the two identities match.
 ///
-/// The broker never resolves or opens a caller-named path here: it compares
-/// two integers against a value it derives itself from a fixed, root-owned
-/// path, so there is no symlink, FIFO, or time-of-check/time-of-use surface
-/// to defend. `tmp_path` is a parameter rather than always reading
-/// [`BROKER_TMP_PATH`] so the stat-failure branch is reachable from a test.
+/// This function never resolves or opens a caller-named path. It compares
+/// two integers against a value that it derives from a fixed, root-owned
+/// path, so it has no symlink, FIFO, or time-of-check/time-of-use attack
+/// surface. `tmp_path` is a parameter, not a fixed read of
+/// [`BROKER_TMP_PATH`], so a test can reach the stat-failure branch.
 fn check_shared_filesystem(tmp_path: &Path, caller_tmp: TmpIdentity, out: &mut impl Write) -> bool {
     let broker_tmp = match fs::metadata(tmp_path) {
         Ok(meta) => TmpIdentity {
@@ -141,14 +141,15 @@ fn own_tmp_mount_root() -> Option<String> {
     tmp_mount_root(&content)
 }
 
-/// Stats the caller's credential directory and each credential file, recording
-/// the observed owner uid and mode of every path. The broker runs this as the
-/// privileged service account on behalf of a caller who cannot stat these paths
-/// directly, then ships the result over the socket so `doctor` can run the
-/// tiered permission classifier against them.
+/// Stats the caller's credential directory and each credential file, and
+/// records the observed owner uid and mode of every path. The broker runs
+/// this as the privileged service account, because the caller cannot stat
+/// these paths directly. The broker then sends the result over the socket,
+/// so `doctor` can run the tiered permission classifier against it.
 ///
-/// Returns an audit with no entries if the user name cannot be resolved to a
-/// credential path (the textual [`run_checks`] surfaces that error separately).
+/// Returns an audit with no entries when the user name does not resolve to
+/// a credential path. The text-based [`run_checks`] reports that error on
+/// its own.
 pub fn audit_credential_paths(creds_root: &Path, user: &str) -> CredentialAudit {
     let paths = match crate::credentials::credential_paths_in(creds_root, user) {
         Ok(p) => p,
@@ -165,9 +166,10 @@ pub fn audit_credential_paths(creds_root: &Path, user: &str) -> CredentialAudit 
     CredentialAudit { entries }
 }
 
-/// Stat one path into a [`PathAudit`]. A path that does not exist (or cannot be
-/// stat'd) is recorded as absent with zeroed owner/mode; the classifier on the
-/// client treats absence separately from a permission widening.
+/// Stats one path and records it as a [`PathAudit`]. When the path does not
+/// exist, or the stat fails, this function records the path as absent with
+/// a zeroed owner and mode. The classifier on the client treats an absent
+/// path differently from a widened permission.
 fn audit_path(label: &str, path: &Path) -> PathAudit {
     match fs::metadata(path) {
         Ok(meta) => PathAudit {
@@ -217,14 +219,15 @@ const MOUNTINFO_ROOT_FIELD: usize = 3;
 const MOUNTINFO_MOUNT_POINT_FIELD: usize = 4;
 
 /// Extracts the mount root of the last `/proc/self/mountinfo` entry whose
-/// mount point is `/tmp`, or `None` when that root is `/` (an ordinary
-/// mount, not a bind mount substituting a private directory for `/tmp`).
+/// mount point is `/tmp`. Returns `None` when that root is `/`, which marks
+/// an ordinary mount rather than a bind mount that substitutes a private
+/// directory for `/tmp`.
 ///
 /// A `PrivateTmp=true` systemd unit bind-mounts a private directory onto
-/// `/tmp` inside its own mount namespace, so the mount point stays `/tmp`
-/// while the mount root records the substitution as a path beginning
-/// `/systemd-private-`. This function reads only the broker's own
-/// mountinfo content; it takes no input from the caller.
+/// `/tmp` inside its own mount namespace. The mount point stays `/tmp`,
+/// while the mount root records the substitution as a path that starts
+/// with `/systemd-private-`. This function reads only the broker's own
+/// mountinfo content. It takes no input from the caller.
 fn tmp_mount_root(mountinfo: &str) -> Option<String> {
     let mut root = None;
     for line in mountinfo.lines() {
@@ -269,19 +272,20 @@ fn read_token_if_available(path: &Path) -> Option<String> {
     }
 }
 
-/// Wall-clock budget for the `gh api user` probe, in seconds. `Command::output`
-/// has no timeout of its own, so the call is wrapped in the coreutils `timeout`
-/// binary.
+/// Wall-clock budget, in seconds, for the `gh api user` probe.
+/// `Command::output` has no timeout of its own, so this call runs inside the
+/// coreutils `timeout` binary.
 // ponytail: fixed timeout, bump if health checks against slow networks start failing
 const GH_PROBE_TIMEOUT_SECS: &str = "10";
 
-/// Substring `gh` writes to stderr when GitHub rejects the token. Any other
-/// failure is classified as unreachable rather than as a bad credential.
+/// Substring that `gh` writes to stderr when GitHub rejects the token.
+/// [`ping_github`] classifies any other failure as unreachable, not as a bad
+/// credential.
 const UNAUTHORIZED_MARKER: &str = "HTTP 401";
 
 /// Validates `token` by running `gh api user` as a subprocess, the same way
-/// every other remote operation in the broker reaches GitHub. `gh`'s built-in
-/// `-q` query engine extracts the login, so no JSON parsing is needed here.
+/// every other remote operation in the broker reaches GitHub. `gh`'s `-q`
+/// query engine extracts the login, so this function does not parse JSON.
 fn ping_github(token: &str) -> GithubResult {
     let output = std::process::Command::new("timeout")
         .args([GH_PROBE_TIMEOUT_SECS, "gh", "api", "user", "-q", ".login"])
@@ -330,13 +334,13 @@ mod tests {
         }
     }
 
-    /// Serializes tests that mutate the process-wide `PATH`, which parallel
-    /// `cargo test` threads would otherwise race on.
+    /// Serializes tests that mutate the process-wide `PATH`. Without this
+    /// lock, parallel `cargo test` threads would race on that shared state.
     static PATH_MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Restores the `PATH` that was in effect before [`install_stub_gh`] and
-    /// releases the serialization lock. Keep it alive for as long as a child
-    /// must resolve the stub.
+    /// Restores the `PATH` value from before [`install_stub_gh`] and
+    /// releases the serialization lock. Keep this guard alive for as long
+    /// as a child process must resolve the stub.
     struct PathGuard {
         _exclusive: std::sync::MutexGuard<'static, ()>,
         original: Option<String>,

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{chown, Group};
 use thiserror::Error;
 
+use crate::broker::CLIENT_GROUP_NAME;
+
 /// Root directory under which per-user credentials live.
 const CREDENTIALS_ROOT: &str = "/etc/ghbrk/credentials";
 
@@ -16,22 +18,16 @@ const SSH_KEY_FILE: &str = "id_rsa";
 /// File name for the GitHub token.
 const TOKEN_FILE: &str = "token";
 
-/// Required permission bits on credential files: 0o600 (owner read+write, no
-/// group, no other).
-const REQUIRED_MODE: u32 = 0o600;
+/// Required permission bits on credential files: owner read+write only.
+pub(crate) const REQUIRED_MODE: u32 = 0o600;
 
 /// Mask isolating the permission bits of a unix mode.
-const PERMISSION_MASK: u32 = 0o777;
-
-/// Group whose members are permitted to connect to the per-operation
-/// ssh-agent socket. Mirrors `broker::CLIENT_GROUP_NAME`; the daemon runs with
-/// this as a supplementary group and privilege-dropped git children inherit it.
-const CLIENT_GROUP_NAME: &str = "ghbrk-clients";
+pub(crate) const PERMISSION_MASK: u32 = 0o777;
 
 /// Lifetime (seconds) of a key loaded into the per-operation ssh-agent via
 /// `ssh-add -t`. The agent is killed when the operation completes
 /// (`SshAgentHandle::drop`), but the TTL bounds key residency as defense in
-/// depth in case cleanup is skipped (e.g. the daemon is SIGKILLed).
+/// depth if cleanup is skipped (for example, the daemon is SIGKILLed).
 const SSH_KEY_TTL_SECS: u64 = 30;
 
 /// Locations of the credential files for a single user.
@@ -89,7 +85,7 @@ pub fn credential_paths(user: &str) -> Result<CredentialPaths, CredentialError> 
 
 /// Returns the credential file paths for `user` rooted at `base`. Does not
 /// check existence. Rejects user names that contain path separators or
-/// parent-directory components, since they could escape the credentials root.
+/// parent-directory components, since they can escape the credentials root.
 pub fn credential_paths_in(base: &Path, user: &str) -> Result<CredentialPaths, CredentialError> {
     if user.is_empty() || user.contains('/') || user.contains('\\') || user == "." || user == ".." {
         return Err(CredentialError::InvalidUser(user.to_string()));
@@ -172,7 +168,7 @@ fn git_safe_dir_env() -> Vec<(String, String)> {
 
 /// Builds env vars for an HTTPS git operation. Returns the env vars and the
 /// `tempfile::NamedTempFile` holding the askpass script. The caller must keep
-/// the script alive for the duration of the git invocation.
+/// the script alive for the git invocation.
 pub struct HttpsGitEnv {
     pub vars: Vec<(String, String)>,
     pub askpass_script: tempfile::NamedTempFile,
@@ -180,7 +176,7 @@ pub struct HttpsGitEnv {
 
 /// Builds the HTTPS git env: writes a temporary askpass script that prints the
 /// token and points `GIT_ASKPASS` at it. The returned struct must outlive the
-/// git invocation; dropping it removes the script from disk.
+/// git invocation. Dropping it removes the script from disk.
 pub fn https_git_env(creds: &Credentials) -> Result<HttpsGitEnv, CredentialError> {
     let mut script = tempfile::Builder::new()
         .prefix("ghbrk-askpass-")
@@ -225,7 +221,7 @@ pub struct SshAgentHandle {
 impl Drop for SshAgentHandle {
     fn drop(&mut self) {
         // Abort the proxy task first so no new agent connections are accepted.
-        // `abort()` is synchronous (signals cancellation; does not await).
+        // `abort()` is synchronous: it signals cancellation and does not await.
         self.proxy_task.abort();
         // Kill + reap the agent so it doesn't linger as a zombie.
         let _ = self.child.kill();
@@ -237,8 +233,8 @@ impl Drop for SshAgentHandle {
 
 /// Resolves the `ghbrk-clients` group GID, mapping every failure mode onto
 /// `AgentStartFailed`. Unlike the broker's best-effort socket chgrp, the agent
-/// escrow *requires* the group: without it, privilege-dropped git children
-/// could not connect to the agent socket, so a missing group is a hard error.
+/// escrow *requires* the group. Without it, a privilege-dropped git child
+/// cannot connect to the agent socket, so a missing group is a hard error.
 fn client_group_gid() -> Result<nix::unistd::Gid, CredentialError> {
     match Group::from_name(CLIENT_GROUP_NAME) {
         Ok(Some(group)) => Ok(group.gid),
@@ -258,19 +254,19 @@ fn client_group_gid() -> Result<nix::unistd::Gid, CredentialError> {
 /// # Security model
 ///
 /// OpenSSH 10+ rejects agent connections from a different UID than the agent
-/// owner. The daemon (ghbrk) owns the agent, so a privilege-dropped git child
-/// (peer user, different UID) would be rejected if given the agent socket
-/// directly.
+/// owner. The daemon (ghbrk) owns the agent. If given the agent socket
+/// directly, a privilege-dropped git child (peer user, different UID) is
+/// rejected.
 ///
-/// Solution — two sockets in the temp dir:
-/// - `agent.sock`: the real ssh-agent socket; only the daemon connects here
-///   (ssh-add runs as daemon → UID matches → accepted).
+/// Solution: two sockets in the temp dir.
+/// - `agent.sock`: the real ssh-agent socket. Only the daemon connects here
+///   (ssh-add runs as daemon, so its UID matches and the connection is accepted).
 /// - `proxy.sock`: a tokio task owned by the daemon bridges connections from
 ///   this socket to `agent.sock`. The proxy connects as the daemon (UID check
-///   passes). The git child connects to `proxy.sock`; no UID check applies
-///   because the proxy is our own code, not ssh-agent.
+///   passes). The git child connects to `proxy.sock`. No UID check applies
+///   there, because the proxy is ghbrk's own code, not ssh-agent.
 ///
-/// Key bytes never leave the daemon's address space; the git child only
+/// Key bytes never leave the daemon's address space. The git child only
 /// receives challenge signatures relayed through the proxy.
 pub async fn start_ssh_agent(
     creds: &Credentials,
@@ -375,7 +371,7 @@ pub async fn start_ssh_agent(
             )));
         }
     };
-    // 0660 ghbrk:ghbrk-clients: group members (privilege-dropped git child) may connect.
+    // 0660 ghbrk:ghbrk-clients: group members (privilege-dropped git child) can connect.
     if let Err(err) =
         std::fs::set_permissions(&proxy_socket, std::fs::Permissions::from_mode(0o660))
     {
@@ -420,7 +416,7 @@ pub async fn start_ssh_agent(
 ///
 /// Runs as the daemon (ghbrk), so ssh-agent's UID check passes on the
 /// `agent_socket` side. The git child (different UID) connects only to
-/// `listener`'s socket; no UID check applies there.
+/// `listener`'s socket. No UID check applies there.
 async fn run_agent_proxy(listener: tokio::net::UnixListener, agent_socket: std::path::PathBuf) {
     while let Ok((client, _)) = listener.accept().await {
         let sock = agent_socket.clone();
@@ -439,10 +435,10 @@ async fn run_agent_proxy(listener: tokio::net::UnixListener, agent_socket: std::
 
 /// Builds env vars for a `gh` invocation.
 ///
-/// `GH_TOKEN` is always supplied from the user's credentials. The executor
-/// clears the parent environment before spawning `gh`, so a `GH_HOST` set on
-/// the daemon (e.g. to target a GitHub Enterprise host or an integration mock)
-/// would otherwise be dropped. It is forwarded here when present.
+/// `GH_TOKEN` always comes from the user's credentials. The executor clears
+/// the parent environment before it spawns `gh`, so this function forwards
+/// the daemon's `GH_HOST` when set (for example, to target a GitHub
+/// Enterprise host or an integration mock). Otherwise the executor drops it.
 pub fn gh_env(token: &str) -> Vec<(String, String)> {
     let mut env = vec![("GH_TOKEN".to_string(), token.to_string())];
     // gh calls os.UserHomeDir() to locate its config dir. Forward the daemon's
@@ -585,11 +581,25 @@ mod tests {
     /// Serializes tests that mutate the process-global `GH_HOST` env var.
     static GH_HOST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Restores a process-global env var to its pre-test value. A test that
+    /// mutates `HOME` or `GH_HOST` and does not restore it leaks that change
+    /// into every other test in the same process, so a later test can pass or
+    /// fail depending on run order alone.
+    fn restore_var(key: &str, original: Option<String>) {
+        match original {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     #[test]
     fn gh_env_sets_gh_token() {
         let _guard = GH_HOST_LOCK.lock().unwrap();
         std::env::remove_var("GH_HOST");
+        let original_home = std::env::var("HOME").ok();
+        std::env::remove_var("HOME");
         let env = gh_env("ghp_secret");
+        restore_var("HOME", original_home);
         assert_eq!(
             env,
             vec![("GH_TOKEN".to_string(), "ghp_secret".to_string())]
@@ -643,9 +653,10 @@ mod tests {
     fn gh_env_forwards_home_when_set() {
         let _guard = GH_HOST_LOCK.lock().unwrap();
         std::env::remove_var("GH_HOST");
+        let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", "/run/ghbrk");
         let env = gh_env("ghp_secret");
-        std::env::remove_var("HOME");
+        restore_var("HOME", original_home);
         assert!(
             env.iter().any(|(k, v)| k == "HOME" && v == "/run/ghbrk"),
             "HOME must be forwarded to gh child processes"
@@ -656,8 +667,10 @@ mod tests {
     fn gh_env_omits_home_when_unset() {
         let _guard = GH_HOST_LOCK.lock().unwrap();
         std::env::remove_var("GH_HOST");
+        let original_home = std::env::var("HOME").ok();
         std::env::remove_var("HOME");
         let env = gh_env("ghp_secret");
+        restore_var("HOME", original_home);
         assert!(
             env.iter().all(|(k, _)| k != "HOME"),
             "HOME must be absent when not set in daemon environment"
@@ -747,8 +760,8 @@ mod tests {
         let dir_path = dir.path().to_path_buf();
         let captured = capture_tracing(|| {
             let creds = load_credentials_from(&dir_path, "alice").unwrap();
-            // Touch every helper that consumes credentials. None of them may log
-            // the token contents.
+            // Touch every helper that consumes credentials. None of them must
+            // log the token contents.
             let _ = gh_env(&creds.token);
             tracing::debug!(?creds, "credentials loaded");
         });

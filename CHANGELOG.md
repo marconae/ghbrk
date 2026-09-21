@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.2]
+
+### Fixed
+- `credentials.rs` unit tests: two tests mutated the process-global `HOME` environment variable without restoring it, leaking the change into later tests in the same run and causing an intermittent flaky failure. All three affected tests now save and restore the original value.
+
+### Changed
+- Comments across the daemon and CLI rewritten for clarity (plain, active-voice sentences); no behavior change.
+- Consolidated three internal constants (`REQUIRED_MODE`, `PERMISSION_MASK`, `CLIENT_GROUP_NAME`) that were each defined twice, to one source per constant.
+- Docker integration harness: centralized the `mock-github` readiness wait behind one helper instead of repeating it at each of the six call sites that need it.
+
 ## [0.3.1]
 
 ### Fixed
