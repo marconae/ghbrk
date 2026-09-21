@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.1]
+
+### Fixed
+- Docker integration harness: `mock-github` readiness is now polled before use instead of assumed right after the `devenv` container responds, removing an intermittent TLS-connect race on cold CI runners.
+- Release pipeline only publishes once lint and the full test suite (including the Docker harness) pass, instead of racing an independent CI run.
+
 ## [0.3.0]
 
 ### Added
