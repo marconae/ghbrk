@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.3]
+
+### Fixed
+- Every SSH git operation was denied with `failed to start ssh-agent: creating temp dir: Read-only file system`, because the systemd unit runs the daemon under `ProtectSystem=strict` with no `PrivateTmp`, leaving `/tmp` read-only, while `start_ssh_agent` created its per-connection temp dir with no directory hint (resolving to `$TMPDIR` or `/tmp`). Added `Environment=TMPDIR=/run/ghbrk` to the unit in both `deploy/linux/ghbrk.service` and the `install.sh` heredoc copy, a path already writable under `ReadWritePaths`.
+
 ## [0.3.2]
 
 ### Fixed

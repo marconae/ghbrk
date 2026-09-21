@@ -11,6 +11,7 @@ Environment=GHBRK_POLICY=/etc/ghbrk/policy.yaml
 Environment=GHBRK_AUDIT_LOG=/var/log/ghbrk/audit.log
 Environment=GHBRK_SOCKET=/run/ghbrk/broker.sock
 Environment=HOME=/run/ghbrk
+Environment=TMPDIR=/run/ghbrk
 Restart=on-failure
 RestartSec=5s
 # Hardening

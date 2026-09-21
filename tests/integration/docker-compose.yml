@@ -28,3 +28,18 @@ services:
       - mock-github
     networks:
       - default
+
+  # Same image as `devenv`, but with /tmp mounted as a read-only tmpfs. This
+  # reproduces the production systemd sandbox (ProtectSystem=strict, no
+  # PrivateTmp) that the ghbrk daemon actually runs under, so the
+  # TMPDIR-unset-and-/tmp-read-only bug reproduces here the way it did in
+  # deployment instead of only in a unit test.
+  devenv-tmpro:
+    build:
+      context: .
+      dockerfile: Dockerfile.devenv
+    container_name: ghbrk-it-devenv-tmpro
+    tmpfs:
+      - /tmp:ro,size=16m
+    networks:
+      - default

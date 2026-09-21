@@ -64,6 +64,13 @@ const MOCK_GH_HOST: &str = "mock-github";
 const CONTAINER_BIN: &str = "/usr/local/bin/ghbrk";
 const CONTAINER_SOCKET: &str = "/tmp/ghbrk-test.sock";
 
+/// Container from the `devenv-tmpro` compose service: the same image as
+/// `devenv`, but with /tmp mounted as a read-only tmpfs (see
+/// `docker-compose.yml`). Every path this container's daemon uses must
+/// therefore live outside /tmp.
+const TMPRO_CONTAINER: &str = "ghbrk-it-devenv-tmpro";
+const TMPRO_SOCKET: &str = "/root/ghbrk-test.sock";
+
 /// Serializes test-level access to the shared Docker Compose project.
 static GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -123,7 +130,12 @@ fn start_compose() -> ComposeGuard {
         .current_dir(compose_dir())
         .output();
 
-    for name in &[CONTAINER_NAME, DEVENV_CONTAINER, "ghbrk-it-mock-github"] {
+    for name in &[
+        CONTAINER_NAME,
+        DEVENV_CONTAINER,
+        "ghbrk-it-mock-github",
+        TMPRO_CONTAINER,
+    ] {
         let _ = Command::new("docker").args(["rm", "-f", name]).output();
     }
 
@@ -1887,4 +1899,266 @@ fn e2e_privilege_drop_0700_home() {
 
     // Best-effort daemon teardown; the compose guard removes the project on drop.
     let _ = docker_exec(DEVENV_CONTAINER, &["pkill", "-f", "ghbrk daemon"]);
+}
+
+// ---------------------------------------------------------------------------
+// Read-only /tmp regression coverage
+//
+// Production runs the daemon under a systemd unit with ProtectSystem=strict
+// and no PrivateTmp, which leaves /tmp read-only to the daemon. `start_ssh_agent`
+// (src/credentials.rs) used to build its per-connection temp dir with no
+// directory hint, which resolves to $TMPDIR or /tmp -- so every SSH git
+// operation was denied with "failed to start ssh-agent: creating temp dir:
+// Read-only file system". The fix adds `Environment=TMPDIR=/run/ghbrk` to the
+// unit. `devenv-tmpro` (docker-compose.yml) reproduces the read-only /tmp
+// constraint in a container so this proves the fix end-to-end rather than in
+// a unit test that never sees the sandboxed filesystem.
+// ---------------------------------------------------------------------------
+
+/// Waits until the `devenv-tmpro` container responds to `docker exec ... true`.
+fn wait_for_tmpro(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let out = Command::new("docker")
+            .args(["exec", TMPRO_CONTAINER, "true"])
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    panic!("devenv-tmpro container not reachable within {timeout:?}");
+}
+
+/// Copies the static binary into `devenv-tmpro`, creates the `ghbrk-clients`
+/// group `start_ssh_agent` requires, and plants credentials + policy under
+/// `/root`, since /tmp is read-only in this container.
+fn provision_tmpro() {
+    let bin = build_static_binary();
+    let cp = Command::new("docker")
+        .args([
+            "cp",
+            &bin.to_string_lossy(),
+            &format!("{TMPRO_CONTAINER}:{CONTAINER_BIN}"),
+        ])
+        .output()
+        .expect("docker cp ghbrk binary");
+    assert!(
+        cp.status.success(),
+        "docker cp binary failed: {}",
+        String::from_utf8_lossy(&cp.stderr)
+    );
+    let chmod = docker_exec(TMPRO_CONTAINER, &["chmod", "755", CONTAINER_BIN]);
+    assert!(chmod.status.success(), "chmod binary failed");
+
+    let group = docker_exec(TMPRO_CONTAINER, &["groupadd", "-f", "ghbrk-clients"]);
+    assert!(
+        group.status.success(),
+        "groupadd ghbrk-clients failed: {}",
+        String::from_utf8_lossy(&group.stderr)
+    );
+
+    let creds_user_dir = "/root/ghbrk-creds/root";
+    let mk = docker_exec(TMPRO_CONTAINER, &["mkdir", "-p", creds_user_dir]);
+    assert!(mk.status.success(), "mkdir creds dir failed");
+    // `ssh-add` parses this file, so it must be a real key, not a placeholder
+    // string; content is otherwise irrelevant since nothing ever verifies a
+    // signature against it.
+    let keygen = docker_exec(
+        TMPRO_CONTAINER,
+        &[
+            "ssh-keygen",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-f",
+            &format!("{creds_user_dir}/id_rsa"),
+        ],
+    );
+    assert!(
+        keygen.status.success(),
+        "ssh-keygen failed: {}",
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+    let chmod_key = docker_exec(
+        TMPRO_CONTAINER,
+        &["chmod", "600", &format!("{creds_user_dir}/id_rsa")],
+    );
+    assert!(chmod_key.status.success(), "chmod id_rsa failed");
+    write_file_in_container(
+        TMPRO_CONTAINER,
+        &format!("{creds_user_dir}/token"),
+        FAKE_TOKEN,
+        "600",
+    );
+
+    write_file_in_container(
+        TMPRO_CONTAINER,
+        "/root/ghbrk-policy.yaml",
+        allow_policy(),
+        "644",
+    );
+}
+
+/// Creates a one-commit repo at `/root/repo` in `devenv-tmpro` with an
+/// `origin` remote at the canonical `ssh://git@github.com/test-org/test.git`
+/// URL the resolver and `allow_policy()` expect, but rewritten via
+/// `insteadOf` to an unreachable local port. The broker's `start_ssh_agent`
+/// step runs before any network I/O, so the push fails fast on a connection
+/// refusal once (and only once) credential setup succeeds -- exactly the
+/// signal this test needs, without depending on a real git server.
+fn seed_ssh_repo_in_tmpro() {
+    let _ = docker_exec(TMPRO_CONTAINER, &["rm", "-rf", "/root/repo"]);
+    let setup = docker_exec(
+        TMPRO_CONTAINER,
+        &[
+            "sh",
+            "-c",
+            "mkdir -p /root/repo && cd /root/repo \
+             && git init -q -b main \
+             && git config user.email test@example.com \
+             && git config user.name Test \
+             && git commit -q --allow-empty -m init \
+             && git remote add origin ssh://git@github.com/test-org/test.git \
+             && git config url.\"ssh://git@127.0.0.1:1/\".insteadOf \"ssh://git@github.com/\"",
+        ],
+    );
+    assert!(
+        setup.status.success(),
+        "seeding ssh repo in devenv-tmpro failed: {}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+}
+
+/// Starts the daemon inside `devenv-tmpro` (detached). `tmpdir` is forwarded
+/// as `TMPDIR`, mirroring the `Environment=TMPDIR=/run/ghbrk` unit fix; `None`
+/// reproduces the pre-fix unit.
+fn start_daemon_in_tmpro(tmpdir: Option<&str>) {
+    let _ = docker_exec(TMPRO_CONTAINER, &["rm", "-f", TMPRO_SOCKET]);
+
+    let mut env_args = vec![
+        format!("GHBRK_SOCKET={TMPRO_SOCKET}"),
+        "GHBRK_POLICY=/root/ghbrk-policy.yaml".to_string(),
+        "GHBRK_CREDENTIALS_ROOT=/root/ghbrk-creds".to_string(),
+        "GHBRK_AUDIT_LOG=/root/ghbrk-audit.log".to_string(),
+    ];
+    if let Some(t) = tmpdir {
+        env_args.push(format!("TMPDIR={t}"));
+    }
+
+    let mut args = vec!["exec", "-d", TMPRO_CONTAINER, "env"];
+    args.extend(env_args.iter().map(String::as_str));
+    args.push(CONTAINER_BIN);
+    args.push("daemon");
+
+    let detached = Command::new("docker")
+        .args(&args)
+        .output()
+        .expect("docker exec -d daemon");
+    assert!(
+        detached.status.success(),
+        "failed to start daemon in devenv-tmpro: {}",
+        String::from_utf8_lossy(&detached.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let test = docker_exec(TMPRO_CONTAINER, &["test", "-S", TMPRO_SOCKET]);
+        if test.status.success() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    panic!("daemon socket {TMPRO_SOCKET} did not appear in devenv-tmpro within 10s");
+}
+
+/// Best-effort kill of the in-container daemon between phases.
+fn stop_daemon_in_tmpro() {
+    let _ = docker_exec(TMPRO_CONTAINER, &["pkill", "-f", "ghbrk daemon"]);
+    let _ = docker_exec(TMPRO_CONTAINER, &["rm", "-f", TMPRO_SOCKET]);
+}
+
+/// Runs `ghbrk git push origin main` in `/root/repo` through the in-container
+/// daemon and returns the captured output.
+fn run_ghbrk_git_push_in_tmpro() -> std::process::Output {
+    Command::new("docker")
+        .args([
+            "exec",
+            "-w",
+            "/root/repo",
+            TMPRO_CONTAINER,
+            "env",
+            &format!("GHBRK_SOCKET={TMPRO_SOCKET}"),
+            CONTAINER_BIN,
+            "git",
+            "push",
+            "origin",
+            "main",
+        ])
+        .output()
+        .expect("docker exec ghbrk git push")
+}
+
+#[test]
+fn e2e_ssh_agent_survives_readonly_tmp_with_tmpdir_fix() {
+    if skip_if_no_docker("e2e_ssh_agent_survives_readonly_tmp_with_tmpdir_fix") {
+        return;
+    }
+    let _lock = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _compose = start_compose();
+    wait_for_tmpro(Duration::from_secs(120));
+
+    provision_tmpro();
+    seed_ssh_repo_in_tmpro();
+
+    // Phase 1 -- pre-fix unit (no TMPDIR): /tmp is read-only, so the agent's
+    // temp dir creation must fail and the broker must deny the push with the
+    // exact error this bug produced in production.
+    start_daemon_in_tmpro(None);
+    let broken = run_ghbrk_git_push_in_tmpro();
+    stop_daemon_in_tmpro();
+    let broken_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&broken.stdout),
+        String::from_utf8_lossy(&broken.stderr)
+    );
+    assert!(
+        !broken.status.success(),
+        "push must fail without the TMPDIR fix: {broken_out}"
+    );
+    assert!(
+        broken_out.contains("failed to start ssh-agent"),
+        "expected the ssh-agent startup failure, got: {broken_out}"
+    );
+    assert!(
+        broken_out.contains("Read-only file system") || broken_out.contains("creating temp dir"),
+        "expected a read-only-tmp cause, got: {broken_out}"
+    );
+
+    // Phase 2 -- fixed unit (TMPDIR=/run/ghbrk): /tmp is still read-only, but
+    // the agent's temp dir now lands in a writable path, so credential setup
+    // must succeed. The push itself still fails (insteadOf points at a closed
+    // local port), but it must fail as a git/network error, never as the
+    // ssh-agent startup error.
+    let mk_tmpdir = docker_exec(TMPRO_CONTAINER, &["mkdir", "-p", "/run/ghbrk"]);
+    assert!(mk_tmpdir.status.success(), "mkdir /run/ghbrk failed");
+    start_daemon_in_tmpro(Some("/run/ghbrk"));
+    let fixed = run_ghbrk_git_push_in_tmpro();
+    stop_daemon_in_tmpro();
+    let fixed_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert!(
+        !fixed_out.contains("failed to start ssh-agent"),
+        "TMPDIR fix did not unblock ssh-agent startup: {fixed_out}"
+    );
+    assert!(
+        !fixed_out.contains("Read-only file system"),
+        "TMPDIR fix did not unblock ssh-agent startup: {fixed_out}"
+    );
 }
